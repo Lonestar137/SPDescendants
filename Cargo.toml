@@ -1,0 +1,59 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# A version two crates share is pinned in `[workspace.dependencies]`; feature additions stay per
+# crate.
+# `too_many_arguments` is off: a Bevy system's parameter list is its dependency declaration.
+[workspace.lints.clippy]
+too_many_arguments = "allow"
+
+[workspace.dependencies]
+anyhow = "1.0"
+# bevy's default features spelled out without `audio`: `2d`, `3d` and `ui` each pull `bevy_audio`
+# and a codec. Add a feature by name, never `2d`/`3d`/`ui`; a plugin that takes bevy with its
+# default features brings the audio stack back too.
+bevy = { version = "0.20.0", default-features = false, features = [
+    "default_app",
+    "default_platform",
+    "2d_bevy_render",
+    "3d_bevy_render",
+    "ui_api",
+    "ui_bevy_render",
+    "scene",
+    "picking",
+] }
+
+# Dependencies at opt-level 3 in dev: at opt-level 0, math- and physics-heavy dependency code
+# drags a run below an interactive frame rate.
+[profile.dev.package."*"]
+opt-level = 3
+
+# Our crates at opt-level 1: Bevy's generic hot paths monomorphize into them, and at opt-level 0
+# they are measurably slower; the warm incremental rebuild cost is ~0.
+[profile.dev]
+opt-level = 1
+
+# The shipping build (`--profile ship`): fat LTO and a single codegen unit, at the cost of link
+# time on every iteration — measure before preferring it over `release`.
+# `-Ctarget-cpu=native` is not set: it is not portable.
+[profile.ship]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+# `release` plus incremental, run as `cargo play`: under `release` a one-line edit to the app
+# crate costs minutes. Incremental applies to workspace members only, so dependencies stay
+# sccache-cacheable; it changes codegen, so it lives here and not in the measured `release`.
+[profile.play]
+inherits = "release"
+incremental = true
+# Not for speed: under `incremental`, thin-local LTO leaves promoted `anon.*.llvm.*` symbols
+# unresolved and the link fails intermittently (rustc #86049).
+lto = "off"

@@ -1,0 +1,20 @@
+[package]
+name = "spdesc-game-core"
+description = "The Bevy-free game simulation: rules, content, persistence, and the GAME_DATA resolver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["dev"]
+# `dev` lets the resolver fall back to this checkout's `GAME_DATA` link. A dependent that
+# ships (the app crate) declares `default-features = false`, so feature unification can never
+# bake a source-tree path into a player build. `scripts/gates.sh`'s no-data rung compiles the
+# workspace with `GAME_DATA=` and proves the no-data path.
+dev = []
+
+[dependencies]
+
+[lints]
+workspace = true

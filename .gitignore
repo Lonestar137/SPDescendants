@@ -1,0 +1,39 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+# Cargo.lock IS committed (this workspace produces binaries).
+
+# --- Game data: NEVER commit ---
+# The `GAME_DATA` folder: read-only runtime input, resolved through the `GAME_DATA` env var
+# (docs/METHOD.md, "The data folder is read-only runtime input"). Its assets, and any code
+# derived from it, live outside this repository by rule. `/GAME_DATA` is the dev link beside the
+# checkout (a symlink to the real install, or an in-tree copy) — machine-local like the link,
+# never committed; `scripts/data-guard.sh` fails the gates when anything under a resolved
+# `GAME_DATA` is tracked.
+/GAME_DATA
+/GAME_DATA/
+
+# Real data files used as test fixtures (document expected paths, do not commit).
+**/tests/fixtures/
+
+# --- the one folder the game persists into ---
+# config, saves, settings. Machine-local by definition: `crates/spdesc`'s local-state module is
+# the only thing in the tree that may write it.
+/spdesc-config/
+
+# Profiling output: `--features bevy/trace_chrome` drops a multi-GB flame chart in the cwd, which
+# otherwise leaves the checkout "dirty".
+trace-*.json
+
+# OS / editor cruft
+.DS_Store
+*.swp
+/.idea/
+# Claude Code: settings and skills under .claude/ are each person's own.
+/.claude/
+
+# Python bytecode from the `scripts/` tooling.
+__pycache__/
+
+TASKBOARD.md
+/*.log
