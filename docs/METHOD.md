@@ -83,6 +83,8 @@ edits before compiling. Do not bundle unrelated behavior just to amortize a buil
 ## Where things live
 
 - `docs/METHOD.md`: binding engineering and provenance rules; never a work log.
+- `docs/research/`: project-authored, provenance-safe evidence for accepted reader contracts;
+  cite inputs and validation, but never include `GAME_DATA` artifacts or local configuration.
 - `crates/`: Rust workspace. `spdesc-game-core` is the Bevy-free simulation (plus the data
   resolver); `spdesc` is the Bevy app that presents it.
 - `scripts/`: gates and instruments (`check.sh` for a round, `gates.sh` at land).
