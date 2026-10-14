@@ -105,6 +105,12 @@ pub struct Animation {
     pub walk: usize,
     /// Index of the run clip.
     pub run: usize,
+    /// Index of the jump/takeoff clip.
+    pub jump: usize,
+    /// Index of the falling clip.
+    pub fall: usize,
+    /// Index of the landing clip.
+    pub land: usize,
     /// Per clip, for each mesh bone, the track that drives it (clips animate different track sets).
     pub bone_to_track: Vec<Vec<Option<usize>>>,
 }
@@ -617,8 +623,11 @@ fn load_animation(data: &mut DataSource, skeleton: &Skeleton) -> Option<Animatio
     let (idle, idle_map) = load(IDLE_CLIP_PATH)?;
     let (walk, walk_map) = load(WALK_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
     let (run, run_map) = load(RUN_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
-    let clips = vec![idle, walk, run];
-    let bone_to_track = vec![idle_map, walk_map, run_map];
+    let (jump, jump_map) = load(JUMP_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
+    let (fall, fall_map) = load(FALL_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
+    let (land, land_map) = load(LAND_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
+    let clips = vec![idle, walk, run, jump, fall, land];
+    let bone_to_track = vec![idle_map, walk_map, run_map, jump_map, fall_map, land_map];
     info!(
         "animation: {} clips, {} bones driven of {} (skeleton has {} bones)",
         clips.len(),
@@ -631,6 +640,9 @@ fn load_animation(data: &mut DataSource, skeleton: &Skeleton) -> Option<Animatio
         idle: 0,
         walk: 1,
         run: 2,
+        jump: 3,
+        fall: 4,
+        land: 5,
         bone_to_track,
     })
 }
@@ -677,6 +689,15 @@ pub const RUN_CLIP_PATH: &str =
 /// A forward walk clip.
 pub const WALK_CLIP_PATH: &str =
     "/M1/Content/Characters/PC/Anim/F/CMN/Sequence/MoveF_0LT_Move_600_F.uasset";
+/// Takeoff, the first part of a jump.
+pub const JUMP_CLIP_PATH: &str =
+    "/M1/Content/Characters/PC/Anim/F/CMN/Sequence/JumpF_0LT_JumpStart.uasset";
+/// The airborne descent pose.
+pub const FALL_CLIP_PATH: &str =
+    "/M1/Content/Characters/PC/Anim/F/CMN/Sequence/JumpF_0LT_JumpEnd.uasset";
+/// Touchdown.
+pub const LAND_CLIP_PATH: &str =
+    "/M1/Content/Characters/PC/Anim/F/CMN/Sequence/JumpF_0LT_JumpLandHard.uasset";
 
 impl DataSource {
     /// The ordered reference-skeleton bone names of the character skeleton (~4930 bones). An
@@ -903,6 +924,19 @@ mod tests {
             moved > 3,
             "the idle changes only {moved} bone poses over half a loop"
         );
+    }
+
+    /// The jump/fall/land clips load (not falling back to the idle).
+    #[test]
+    fn jump_and_land_clips_load() {
+        let Some(assets) = build_or_skip() else {
+            return;
+        };
+        let a = assets.animation.as_ref().expect("the clips load");
+        assert_eq!(a.clips.len(), 6);
+        assert_eq!(a.clips[a.jump].num_samples, 31, "JumpStart");
+        assert_eq!(a.clips[a.fall].num_samples, 50, "JumpEnd");
+        assert_eq!(a.clips[a.land].num_samples, 44, "JumpLandHard");
     }
 
     /// A pure conversion check that does not need data: game `(x, y, z)` cm maps to Bevy

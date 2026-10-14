@@ -4,8 +4,9 @@
 //! The app decides nothing here: `spdesc-game-core` owns how a character moves
 //! ([`spdesc_game_core::movement`]); this module reads a keyboard and mouse, converts them to a
 //! [`MoveIntent`] and a camera orbit, advances the simulation by the frame's delta, and copies the
-//! result onto a Bevy [`Transform`]. The camera orbits the character independently of its facing,
-//! and movement is relative to the camera, so the character stays put while the camera is moved.
+//! result onto a Bevy [`Transform`]. Movement is world-relative and the camera orbits
+//! independently, so moving the camera never changes where the character goes or which way it
+//! faces.
 
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
@@ -41,23 +42,43 @@ pub struct CameraRig {
     pub pitch: f64,
 }
 
-/// A bone with a small procedural idle: it oscillates about its bind rotation so the character is
-/// not frozen in its bind pose. Game-accurate animation (the shipped `AnimSequence` codec) is a
-/// later slice; this is the documented local stand-in.
+/// Poses the character's skeleton each frame from the decoded clips: idle/walk/run on the ground,
+/// a takeoff clip while rising, a falling clip while descending, and a landing clip on touchdown.
 #[derive(Component)]
 pub struct Animator {
     pub clips: Vec<AnimClip>,
     pub idle: usize,
     pub walk: usize,
     pub run: usize,
+    pub jump: usize,
+    pub fall: usize,
+    pub land: usize,
     pub bone_to_track: Vec<Vec<Option<usize>>>,
     pub bones: Vec<Entity>,
     pub skeleton: Skeleton,
+    /// Looping locomotion time, seconds.
     pub time: f32,
+    /// Seconds since the jump took off (rising phase).
+    pub air_timer: f32,
+    /// Seconds since the apex (falling phase).
+    pub fall_timer: f32,
+    /// Seconds left of the landing one-shot.
+    pub land_timer: f32,
+    /// Whether the character was on the ground last frame (to detect a touchdown).
+    pub was_grounded: bool,
 }
 
-/// Pose the skeleton from the active locomotion clip. Standing still plays the idle, moving plays
-/// the walk, and sprinting the run; the clip is looped and sampled by time.
+fn clip_duration(clip: &AnimClip) -> f32 {
+    if clip.sample_rate <= 0.0 {
+        0.0
+    } else {
+        clip.num_samples as f32 / clip.sample_rate
+    }
+}
+
+/// Advance and apply the character animation. Grounded: idle/walk/run, looped. Airborne: the
+/// takeoff clip while rising and the falling clip while descending, each a one-shot that holds its
+/// last frame. On touchdown: the landing clip once, then back to locomotion.
 pub fn animate_locomotion(
     time: Res<Time>,
     mut players: Query<(&Player, &mut Animator)>,
@@ -65,33 +86,61 @@ pub fn animate_locomotion(
 ) {
     let dt = time.delta_secs();
     for (player, mut animator) in &mut players {
-        let speed = {
-            let v = player.character.velocity;
-            v[0].hypot(v[1])
-        };
-        let index = if speed > 600.0 {
-            animator.run
-        } else if speed > 20.0 {
-            animator.walk
+        let grounded = player.character.grounded;
+        let velocity = player.character.velocity;
+        let speed = velocity[0].hypot(velocity[1]);
+        let rising = velocity[2] > 0.0;
+
+        let land_duration = clip_duration(&animator.clips[animator.land]);
+        if grounded {
+            if !animator.was_grounded {
+                animator.land_timer = land_duration;
+            }
+            animator.air_timer = 0.0;
+            animator.fall_timer = 0.0;
+        } else if rising {
+            animator.air_timer += dt;
         } else {
-            animator.idle
-        };
-        if index >= animator.clips.len() {
-            continue;
+            animator.fall_timer += dt;
         }
-        let (num_samples, sample_rate) = {
-            let clip = &animator.clips[index];
-            (clip.num_samples, clip.sample_rate)
+        animator.was_grounded = grounded;
+
+        // Choose the clip and how far into it (seconds) we are.
+        let (index, at) = if !grounded {
+            if rising {
+                (animator.jump, animator.air_timer)
+            } else {
+                (animator.fall, animator.fall_timer)
+            }
+        } else if animator.land_timer > 0.0 {
+            let at = land_duration - animator.land_timer;
+            animator.land_timer = (animator.land_timer - dt).max(0.0);
+            (animator.land, at)
+        } else {
+            let index = if speed > 600.0 {
+                animator.run
+            } else if speed > 20.0 {
+                animator.walk
+            } else {
+                animator.idle
+            };
+            let duration = clip_duration(&animator.clips[index]);
+            animator.time = (animator.time + dt) % duration.max(1e-3);
+            (index, animator.time)
         };
-        let duration = num_samples as f32 / sample_rate;
-        if duration <= 0.0 {
-            continue;
-        }
-        animator.time = (animator.time + dt) % duration;
-        let sample = ((animator.time * sample_rate) as usize).min(num_samples as usize - 1);
+
+        let clip = &animator.clips[index];
+        // The jump/fall/land clips are one-shots: hold the last frame if the phase outlasts them.
+        let one_shot = index == animator.jump || index == animator.fall || index == animator.land;
+        let at = if one_shot {
+            at.min(clip_duration(clip))
+        } else {
+            at
+        };
+        let sample = ((at * clip.sample_rate) as usize).min(clip.num_samples as usize - 1);
         let locals = crate::content::pose_bone_locals(
             &animator.skeleton,
-            &animator.clips[index],
+            clip,
             &animator.bone_to_track[index],
             sample,
         );
@@ -181,29 +230,32 @@ pub fn drive_player(
                 .clamp(-MAX_PITCH, MAX_PITCH);
         }
     }
-    let frame_yaw = rigs.single().map(|r| r.yaw).unwrap_or(0.0);
 
     let mut intent = MoveIntent {
         sprint: keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]),
         jump: keys.just_pressed(KeyCode::Space),
         ..default()
     };
-    if keys.pressed(KeyCode::KeyW) {
+    let down = |a: KeyCode, b: KeyCode| keys.pressed(a) || keys.pressed(b);
+    if down(KeyCode::KeyW, KeyCode::ArrowUp) {
         intent.forward += 1.0;
     }
-    if keys.pressed(KeyCode::KeyS) {
+    if down(KeyCode::KeyS, KeyCode::ArrowDown) {
         intent.forward -= 1.0;
     }
-    if keys.pressed(KeyCode::KeyD) {
+    if down(KeyCode::KeyD, KeyCode::ArrowRight) {
         intent.right += 1.0;
     }
-    if keys.pressed(KeyCode::KeyA) {
+    if down(KeyCode::KeyA, KeyCode::ArrowLeft) {
         intent.right -= 1.0;
     }
 
     for (mut player, mut transform) in &mut players {
         let params = player.params;
-        player.character.step(&params, intent, frame_yaw, 0.0, dt);
+        // World-relative movement: the keys pick a world direction and the camera orbits
+        // independently, so moving the camera does not change where the character goes. Pass `0`
+        // as the movement frame yaw.
+        player.character.step(&params, intent, 0.0, 0.0, dt);
         transform.translation = position_to_bevy(player.character.position);
         transform.rotation =
             Quat::from_rotation_y(player.character.yaw.to_radians() as f32 + MODEL_YAW_OFFSET);
@@ -286,7 +338,8 @@ mod tests {
             "the character does not turn with the camera"
         );
 
-        // Now forward input goes the way the camera faces (turned), not +X.
+        // Now forward input still goes along world +X: the camera orbits independently and does
+        // not steer the character.
         app.world_mut()
             .resource_mut::<AccumulatedMouseMotion>()
             .delta = Vec2::ZERO;
@@ -296,9 +349,37 @@ mod tests {
         app.update();
         let transform = *app.world().entity(player).get::<Transform>().unwrap();
         assert!(
-            transform.translation.z < -0.01,
-            "movement must follow the camera yaw, got {:?}",
+            transform.translation.z.abs() < 1e-4 && transform.translation.x > 0.39,
+            "world-relative movement must not follow the camera, got {:?}",
             transform.translation
+        );
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::KeyW);
+
+        // "Right" moves the character to the player's right: in the game's left-handed frame that
+        // is -Y (which is what the forward-facing camera shows on screen as right).
+        let before = app
+            .world()
+            .entity(player)
+            .get::<Player>()
+            .unwrap()
+            .character
+            .position;
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ArrowRight);
+        app.update();
+        let after = app
+            .world()
+            .entity(player)
+            .get::<Player>()
+            .unwrap()
+            .character
+            .position;
+        assert!(
+            after[1] < before[1] - 1.0 && (after[0] - before[0]).abs() < 1e-4,
+            "right must move toward -Y, got {before:?} -> {after:?}"
         );
     }
 }

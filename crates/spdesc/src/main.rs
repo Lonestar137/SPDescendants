@@ -229,10 +229,17 @@ fn spawn_character(
                     idle: animation.idle,
                     walk: animation.walk,
                     run: animation.run,
+                    jump: animation.jump,
+                    fall: animation.fall,
+                    land: animation.land,
                     bone_to_track: animation.bone_to_track,
                     bones: bones.clone(),
                     skeleton,
                     time: 0.0,
+                    air_timer: 0.0,
+                    fall_timer: 0.0,
+                    land_timer: 0.0,
+                    was_grounded: true,
                 });
             }
 

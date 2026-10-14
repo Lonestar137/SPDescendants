@@ -11,8 +11,8 @@
 //! Coordinates are the game's: TFD (Unreal) is left-handed with **+X forward, +Y right, +Z up**
 //! and **centimetres**. Yaw is degrees counter-clockwise from +X; the character's facing yaw
 //! follows its movement direction. Movement is resolved against a *movement frame* yaw supplied by
-//! the caller (the camera's yaw), so the camera can orbit a stationary character. The simulation
-//! never reads a clock: [`Character::step`] takes the elapsed seconds.
+//! the caller (world-relative movement passes `0`; a camera-relative scheme passes the camera's
+//! yaw). The simulation never reads a clock: [`Character::step`] takes the elapsed seconds.
 
 /// Tuning for [`Character::step`]. `Default` is the documented local rule, not extracted data.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -112,7 +112,10 @@ impl Character {
             (r.cos(), r.sin())
         };
         let forward = [cy, sy];
-        let right = [-sy, cy];
+        // The game frame is left-handed (+X forward, +Y right, +Z up), so a forward-facing
+        // character's right is the *clockwise* perpendicular of forward, `(sin, -cos)`. (Taking the
+        // counter-clockwise one puts the player's right on their left.)
+        let right = [sy, -cy];
         let mut wish = [
             forward[0] * mv.forward + right[0] * mv.right,
             forward[1] * mv.forward + right[1] * mv.right,
@@ -193,6 +196,24 @@ mod tests {
         assert!(c.position[1].abs() < 1e-9);
         assert_eq!(c.position[2], 0.0);
         assert_eq!(c.yaw, 0.0, "the character faces the direction it moves");
+    }
+
+    #[test]
+    fn right_input_is_the_player_right_in_the_left_handed_frame() {
+        let (p, mut c) = walk();
+        c.step(
+            &p,
+            MoveIntent {
+                right: 1.0,
+                ..MoveIntent::default()
+            },
+            0.0,
+            0.0,
+            0.1,
+        );
+        // The game frame is left-handed, so a character facing +X (yaw 0) has its right along -Y.
+        assert!(c.position[0].abs() < 1e-6, "no forward component");
+        assert!((c.position[1] + 40.0).abs() < 1e-6, "right moves toward -Y");
     }
 
     #[test]
