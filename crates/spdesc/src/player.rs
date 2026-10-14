@@ -2,28 +2,80 @@
 //! step, the entity's transform, and the third-person camera.
 //!
 //! The app decides nothing here: `spdesc-game-core` owns how a character moves
-//! ([`spdesc_game_core::movement`]); this module only reads a keyboard and mouse, converts them to
-//! [`MoveIntent`]/[`LookIntent`], advances the simulation by the frame's delta, and copies the
-//! result onto a Bevy [`Transform`].
+//! ([`spdesc_game_core::movement`]); this module reads a keyboard and mouse, converts them to a
+//! [`MoveIntent`] and a camera orbit, advances the simulation by the frame's delta, and copies the
+//! result onto a Bevy [`Transform`]. The camera orbits the character independently of its facing,
+//! and movement is relative to the camera, so the character stays put while the camera is moved.
 
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
-use spdesc_game_core::movement::{Character, LookIntent, MoveIntent, MovementParams};
+use spdesc_game_core::movement::{Character, MoveIntent, MovementParams};
 
-/// Degrees of yaw/pitch per count of mouse motion.
+/// Degrees of camera yaw/pitch per count of mouse motion.
 const MOUSE_SENSITIVITY: f64 = 0.12;
 /// The camera's distance behind the character, metres.
 const CAMERA_DISTANCE: f32 = 4.0;
 /// The camera's look-at height above the character's feet, metres.
 const CAMERA_TARGET_HEIGHT: f32 = 1.4;
+/// The camera's pitch clamp, degrees.
+const MAX_PITCH: f64 = 80.0;
 
 /// The player entity. The simulation state lives here; presentation reads it.
 #[derive(Component, Default)]
 pub struct Player {
     pub character: Character,
     pub params: MovementParams,
+}
+
+/// The camera's orbit around the player, independent of the player's facing.
+#[derive(Component, Default)]
+pub struct CameraRig {
+    /// Orbit yaw, degrees counter-clockwise from +X (the game frame).
+    pub yaw: f64,
+    /// Orbit pitch, degrees up.
+    pub pitch: f64,
+}
+
+/// A bone with a small procedural idle: it oscillates about its bind rotation so the character is
+/// not frozen in its bind pose. Game-accurate animation (the shipped `AnimSequence` codec) is a
+/// later slice; this is the documented local stand-in.
+#[derive(Component)]
+pub struct IdleBone {
+    /// The bone's bind local rotation, which the oscillation is applied about.
+    pub base_rotation: Quat,
+    /// Peak rotation, radians per axis, in Euler `XYZ`.
+    pub amplitude: Vec3,
+    pub phase: f32,
+    /// Oscillation rate, radians per second.
+    pub speed: f32,
+}
+
+impl IdleBone {
+    pub fn new(base_rotation: Quat, amplitude: Vec3, phase: f32, speed: f32) -> Self {
+        Self {
+            base_rotation,
+            amplitude,
+            phase,
+            speed,
+        }
+    }
+}
+
+/// Oscillate every [`IdleBone`] about its bind rotation.
+pub fn animate_idle(time: Res<Time>, mut bones: Query<(&IdleBone, &mut Transform)>) {
+    let t = time.elapsed_secs();
+    for (idle, mut transform) in &mut bones {
+        let s = t * idle.speed + idle.phase;
+        transform.rotation = idle.base_rotation
+            * Quat::from_euler(
+                EulerRot::XYZ,
+                idle.amplitude.x * s.sin(),
+                idle.amplitude.y * (s * 0.8).sin(),
+                idle.amplitude.z * (s * 1.3).sin(),
+            );
+    }
 }
 
 /// Game-space position (cm, `+Z` up) to Bevy's (m, `+Y` up): `(x, y, z)` → `(x, z, -y) * 0.01`.
@@ -35,9 +87,14 @@ fn position_to_bevy(p: [f64; 3]) -> Vec3 {
     )
 }
 
-/// Game-space direction (unit) to Bevy's.
-fn direction_to_bevy(d: [f64; 3]) -> Vec3 {
-    Vec3::new(d[0] as f32, d[2] as f32, -d[1] as f32)
+/// A camera look direction (game yaw/pitch, degrees) to Bevy's frame.
+fn look_direction_to_bevy(yaw: f64, pitch: f64) -> Vec3 {
+    let (y, p) = (yaw.to_radians(), pitch.to_radians());
+    Vec3::new(
+        (p.cos() * y.cos()) as f32,
+        p.sin() as f32,
+        (-p.cos() * y.sin()) as f32,
+    )
 }
 
 /// Grab and hide the cursor on startup, so mouse-look works without the pointer leaving the
@@ -69,17 +126,32 @@ pub fn toggle_cursor(
     }
 }
 
-/// Read input, advance the player's simulation by the frame delta, and write the result to the
-/// player's transform.
+/// Read input, orbit the camera with the mouse, advance the player's simulation by the frame
+/// delta, and write the result to the player's transform.
 pub fn drive_player(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<AccumulatedMouseMotion>,
     windows: Query<&CursorOptions, With<PrimaryWindow>>,
+    mut rigs: Query<&mut CameraRig>,
     mut players: Query<(&mut Player, &mut Transform)>,
 ) {
     // Cap the step so a hitch cannot teleport the character or blow up the integration.
     let dt = (time.delta_secs() as f64).clamp(0.0, 0.05);
+
+    // Mouse-look only while the cursor is grabbed; a windowed (headless) app defaults to looking.
+    let grabbed = windows
+        .single()
+        .map(|o| o.grab_mode != CursorGrabMode::None)
+        .unwrap_or(true);
+    if grabbed {
+        for mut rig in &mut rigs {
+            rig.yaw = (rig.yaw + f64::from(mouse.delta.x) * MOUSE_SENSITIVITY).rem_euclid(360.0);
+            rig.pitch = (rig.pitch - f64::from(mouse.delta.y) * MOUSE_SENSITIVITY)
+                .clamp(-MAX_PITCH, MAX_PITCH);
+        }
+    }
+    let frame_yaw = rigs.single().map(|r| r.yaw).unwrap_or(0.0);
 
     let mut intent = MoveIntent {
         sprint: keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]),
@@ -98,42 +170,28 @@ pub fn drive_player(
     if keys.pressed(KeyCode::KeyA) {
         intent.right -= 1.0;
     }
-    // Mouse-look only while the cursor is grabbed; a windowed (headless) app defaults to looking.
-    let grabbed = windows
-        .single()
-        .map(|o| o.grab_mode != CursorGrabMode::None)
-        .unwrap_or(true);
-    // Window/`AccumulatedMouseMotion`: `+x` is right, `+y` is down. Right turns the yaw up; up
-    // (negative `y`) raises the pitch.
-    let look = if grabbed {
-        LookIntent {
-            yaw_delta: f64::from(mouse.delta.x) * MOUSE_SENSITIVITY,
-            pitch_delta: -f64::from(mouse.delta.y) * MOUSE_SENSITIVITY,
-        }
-    } else {
-        LookIntent::default()
-    };
 
     for (mut player, mut transform) in &mut players {
         let params = player.params;
-        player.character.step(&params, intent, look, 0.0, dt);
+        player.character.step(&params, intent, frame_yaw, 0.0, dt);
         transform.translation = position_to_bevy(player.character.position);
         transform.rotation = Quat::from_rotation_y(player.character.yaw.to_radians() as f32);
     }
 }
 
-/// Place the camera behind the player along its look direction, aimed at its upper body.
+/// Place the camera on its orbit around the player, aimed at its upper body. The orbit is
+/// independent of the player's facing, so the player can be viewed from any side.
 pub fn follow_camera(
     players: Query<&Player>,
+    rigs: Query<&CameraRig>,
     mut cameras: Query<&mut Transform, (With<Camera3d>, Without<Player>)>,
 ) {
-    let Ok(player) = players.single() else {
+    let (Ok(player), Ok(rig), Ok(mut camera)) =
+        (players.single(), rigs.single(), cameras.single_mut())
+    else {
         return;
     };
-    let Ok(mut camera) = cameras.single_mut() else {
-        return;
-    };
-    let dir = direction_to_bevy(player.character.look_direction());
+    let dir = look_direction_to_bevy(rig.yaw, rig.pitch);
     let target = position_to_bevy(player.character.position) + Vec3::Y * CAMERA_TARGET_HEIGHT;
     let eye = target - dir * CAMERA_DISTANCE;
     *camera = Transform::from_translation(eye).looking_at(target, Vec3::Y);
@@ -144,14 +202,13 @@ mod tests {
     use super::*;
     use core::time::Duration;
 
-    /// The wiring this module owns — a held key and a mouse delta become a simulation step and a
-    /// moved transform — proven headless, without a window or a GPU.
+    /// The wiring this module owns: movement follows the input relative to the camera, and the
+    /// mouse orbits the camera without turning the character. Proven headless.
     #[test]
-    fn forward_input_moves_the_player_and_mouse_turns_it() {
+    fn movement_follows_the_camera_and_the_mouse_orbits_it() {
         let mut app = App::new();
         app.init_resource::<ButtonInput<KeyCode>>();
         app.init_resource::<AccumulatedMouseMotion>();
-        // A fixed step: without TimePlugin the resource keeps the delta we set.
         let mut time = Time::<()>::default();
         time.advance_by(Duration::from_millis(100));
         app.insert_resource(time);
@@ -161,28 +218,55 @@ mod tests {
             .world_mut()
             .spawn((Player::default(), Transform::default()))
             .id();
+        let camera = app.world_mut().spawn(CameraRig::default()).id();
+
+        // Forward input with the camera at yaw 0: the character moves along Bevy +X (the step is
+        // clamped to 0.05 s, so 400 cm/s * 0.05 s = 0.2 m).
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
             .press(KeyCode::KeyW);
         app.update();
-
         let transform = *app.world().entity(player).get::<Transform>().unwrap();
-        // Yaw 0 faces +X; the step is clamped to 0.05 s, so 400 cm/s * 0.05 s = 0.2 m along +X.
         assert!(
             (transform.translation.x - 0.2).abs() < 1e-4,
             "expected a step along +X, got {:?}",
             transform.translation
         );
 
-        // Turning the mouse right increases yaw, so a second step veers toward Bevy -Z.
+        // Standing still, turning the mouse right orbits the camera without turning the character.
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::KeyW);
         app.world_mut()
             .resource_mut::<AccumulatedMouseMotion>()
             .delta = Vec2::new(100.0, 0.0);
         app.update();
+        let rig = app.world().entity(camera).get::<CameraRig>().unwrap();
+        assert!(rig.yaw > 1.0, "the camera must orbit with the mouse");
+        let character_yaw = app
+            .world()
+            .entity(player)
+            .get::<Player>()
+            .unwrap()
+            .character
+            .yaw;
+        assert_eq!(
+            character_yaw, 0.0,
+            "the character does not turn with the camera"
+        );
+
+        // Now forward input goes the way the camera faces (turned), not +X.
+        app.world_mut()
+            .resource_mut::<AccumulatedMouseMotion>()
+            .delta = Vec2::ZERO;
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+        app.update();
         let transform = *app.world().entity(player).get::<Transform>().unwrap();
         assert!(
             transform.translation.z < -0.01,
-            "turning right must change z, got {:?}",
+            "movement must follow the camera yaw, got {:?}",
             transform.translation
         );
     }

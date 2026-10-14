@@ -1,4 +1,4 @@
-//! The character movement rule: a capsule walking, jumping, and looking on ground at a given
+//! The character movement rule: a capsule walking, jumping, and turning on ground at a given
 //! height.
 //!
 //! This is the project-owned simulation of The First Descendant's `M1CharacterMovementComponent`
@@ -8,9 +8,11 @@
 //! ([`MovementParams::default`] documents the chosen local rule), the numbers here are a
 //! deliberate, single-player stand-in.
 //!
-//! Coordinates are the game's: right-handed? No — TFD (Unreal) is left-handed with **+X forward,
-//! +Y right, +Z up** and **centimetres**. Yaw is degrees counter-clockwise from +X, pitch degrees
-//! up. The simulation never reads a clock: [`Character::step`] takes the elapsed seconds.
+//! Coordinates are the game's: TFD (Unreal) is left-handed with **+X forward, +Y right, +Z up**
+//! and **centimetres**. Yaw is degrees counter-clockwise from +X; the character's facing yaw
+//! follows its movement direction. Movement is resolved against a *movement frame* yaw supplied by
+//! the caller (the camera's yaw), so the camera can orbit a stationary character. The simulation
+//! never reads a clock: [`Character::step`] takes the elapsed seconds.
 
 /// Tuning for [`Character::step`]. `Default` is the documented local rule, not extracted data.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -25,8 +27,8 @@ pub struct MovementParams {
     pub gravity: f64,
     /// Horizontal acceleration while airborne, cm/s².
     pub air_accel: f64,
-    /// Nearest-pitch clamp, degrees.
-    pub max_pitch_degrees: f64,
+    /// Turn rate toward the movement direction, degrees per second.
+    pub turn_rate: f64,
 }
 
 impl Default for MovementParams {
@@ -40,7 +42,7 @@ impl Default for MovementParams {
             jump_z_velocity: 600.0,
             gravity: 980.0,
             air_accel: 800.0,
-            max_pitch_degrees: 89.0,
+            turn_rate: 720.0,
         }
     }
 }
@@ -48,7 +50,7 @@ impl Default for MovementParams {
 /// The player's movement intent for one step, already resolved from input.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MoveIntent {
-    /// Forward input, `-1..=1` (positive is forward).
+    /// Forward input, `-1..=1` (positive is forward, away from the camera).
     pub forward: f64,
     /// Right input, `-1..=1` (positive is right).
     pub right: f64,
@@ -58,20 +60,13 @@ pub struct MoveIntent {
     pub jump: bool,
 }
 
-/// The player's look intent for one step, already scaled to degrees.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct LookIntent {
-    pub yaw_delta: f64,
-    pub pitch_delta: f64,
-}
-
 /// A character's kinematic state. Lengths are centimetres, angles degrees.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Character {
     pub position: [f64; 3],
     pub velocity: [f64; 3],
+    /// Facing yaw, degrees counter-clockwise from +X. Follows the movement direction.
     pub yaw: f64,
-    pub pitch: f64,
     pub grounded: bool,
 }
 
@@ -81,64 +76,56 @@ impl Default for Character {
             position: [0.0, 0.0, 0.0],
             velocity: [0.0, 0.0, 0.0],
             yaw: 0.0,
-            pitch: 0.0,
             grounded: true,
         }
     }
 }
 
 impl Character {
-    /// Unit forward vector in the horizontal plane (yaw only).
-    pub fn forward(&self) -> [f64; 3] {
+    /// Unit facing vector in the horizontal plane.
+    pub fn facing(&self) -> [f64; 3] {
         let y = self.yaw.to_radians();
         [y.cos(), y.sin(), 0.0]
     }
 
-    /// Unit right vector in the horizontal plane (yaw only).
-    pub fn right(&self) -> [f64; 3] {
-        let y = self.yaw.to_radians();
-        [-y.sin(), y.cos(), 0.0]
-    }
-
-    /// Unit look direction including pitch (for the camera).
-    pub fn look_direction(&self) -> [f64; 3] {
-        let (y, p) = (self.yaw.to_radians(), self.pitch.to_radians());
-        [p.cos() * y.cos(), p.cos() * y.sin(), p.sin()]
-    }
-
-    /// Advance one step of `dt` seconds. `ground_height` is the floor's Z at this position (a flat
-    /// plane is the MVP map). Movement is horizontal-instant on the ground and accelerated in the
-    /// air; gravity always applies; the pitch clamp is applied after looking.
+    /// Advance one step of `dt` seconds. `frame_yaw` is the yaw the input is relative to (the
+    /// camera's), `ground_height` the floor's Z (a flat plane is the MVP map). Movement is
+    /// horizontal-instant on the ground and accelerated in the air; the facing yaw turns toward
+    /// the movement direction; gravity always applies.
     pub fn step(
         &mut self,
         params: &MovementParams,
         mv: MoveIntent,
-        look: LookIntent,
+        frame_yaw: f64,
         ground_height: f64,
         dt: f64,
     ) {
-        // Look.
-        self.yaw = (self.yaw + look.yaw_delta).rem_euclid(360.0);
-        self.pitch = (self.pitch + look.pitch_delta)
-            .clamp(-params.max_pitch_degrees, params.max_pitch_degrees);
-
         // Jump, before integrating so the impulse is visible this step.
         if self.grounded && mv.jump {
             self.velocity[2] = params.jump_z_velocity;
             self.grounded = false;
         }
 
-        // Desired horizontal velocity from the intent in the yaw frame.
-        let f = self.forward();
-        let r = self.right();
+        // Desired direction from the intent, in the movement frame.
+        let (cy, sy) = {
+            let r = frame_yaw.to_radians();
+            (r.cos(), r.sin())
+        };
+        let forward = [cy, sy];
+        let right = [-sy, cy];
         let mut wish = [
-            f[0] * mv.forward + r[0] * mv.right,
-            f[1] * mv.forward + r[1] * mv.right,
+            forward[0] * mv.forward + right[0] * mv.right,
+            forward[1] * mv.forward + right[1] * mv.right,
         ];
         let len = wish[0].hypot(wish[1]);
         if len > 1e-9 {
             wish[0] /= len;
             wish[1] /= len;
+            // Face the movement direction (shortest turn, respecting the turn rate).
+            let target = wish[1].atan2(wish[0]).to_degrees().rem_euclid(360.0);
+            let delta = (target - self.yaw + 540.0).rem_euclid(360.0) - 180.0;
+            let max_turn = params.turn_rate * dt;
+            self.yaw = (self.yaw + delta.clamp(-max_turn, max_turn)).rem_euclid(360.0);
         } else {
             wish = [0.0, 0.0];
         }
@@ -189,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn walking_moves_along_the_facing_direction() {
+    fn walking_moves_along_the_frame_direction() {
         let (p, mut c) = walk();
         c.step(
             &p,
@@ -197,33 +184,53 @@ mod tests {
                 forward: 1.0,
                 ..MoveIntent::default()
             },
-            LookIntent::default(),
+            0.0,
             0.0,
             0.1,
         );
-        // Yaw 0 faces +X: one step at 400 cm/s for 0.1 s is 40 cm, and nothing on Y.
+        // Frame yaw 0 faces +X: one step at 400 cm/s for 0.1 s is 40 cm, and nothing on Y.
         assert!((c.position[0] - 40.0).abs() < 1e-6);
         assert!(c.position[1].abs() < 1e-9);
         assert_eq!(c.position[2], 0.0);
+        assert_eq!(c.yaw, 0.0, "the character faces the direction it moves");
     }
 
     #[test]
-    fn strafing_is_perpendicular_to_facing() {
+    fn movement_is_relative_to_the_frame_yaw() {
         let (p, mut c) = walk();
-        c.yaw = 90.0; // faces +Y
+        // Camera faces +Y; forward input moves the character to +Y and it turns to face +Y.
         c.step(
             &p,
             MoveIntent {
-                right: 1.0,
+                forward: 1.0,
                 ..MoveIntent::default()
             },
-            LookIntent::default(),
+            90.0,
             0.0,
             0.1,
         );
-        // Facing +Y, right is -X: 40 cm in -X.
-        assert!((c.position[0] + 40.0).abs() < 1e-6);
-        assert!(c.position[1].abs() < 1e-9);
+        assert!(c.position[0].abs() < 1e-6);
+        assert!((c.position[1] - 40.0).abs() < 1e-6);
+        // The turn toward the movement direction is rate-limited, but it starts turning.
+        assert!(c.yaw > 0.0 && c.yaw <= 90.0);
+    }
+
+    #[test]
+    fn facing_turns_toward_the_movement_direction_within_the_turn_rate() {
+        let (p, mut c) = walk();
+        // Facing +X, asked to move toward +Y (frame 90°, forward): the turn is clamped by the
+        // turn rate over a very short step.
+        c.step(
+            &p,
+            MoveIntent {
+                forward: 1.0,
+                ..MoveIntent::default()
+            },
+            90.0,
+            0.0,
+            0.001,
+        );
+        assert!(c.yaw > 0.0 && c.yaw < 90.0, "yaw {0}", c.yaw);
     }
 
     #[test]
@@ -231,9 +238,7 @@ mod tests {
         let (p, mut c) = walk();
         let mut peak = 0.0f64;
         let mut airborne_steps = 0;
-        // 0.5 s up + down at 200 Hz.
         for i in 0..400 {
-            // With 600 cm/s up and 980 cm/s² down, the arc peaks ~0.61 s; 2 s is plenty.
             let jump = i == 0;
             c.step(
                 &p,
@@ -241,7 +246,7 @@ mod tests {
                     jump,
                     ..MoveIntent::default()
                 },
-                LookIntent::default(),
+                0.0,
                 0.0,
                 0.005,
             );
@@ -269,26 +274,9 @@ mod tests {
             sprint,
             ..MoveIntent::default()
         };
-        a.step(&p, mv(false), LookIntent::default(), 0.0, 0.1);
-        b.step(&p, mv(true), LookIntent::default(), 0.0, 0.1);
+        a.step(&p, mv(false), 0.0, 0.0, 0.1);
+        b.step(&p, mv(true), 0.0, 0.0, 0.1);
         assert!(b.position[0] > a.position[0]);
-    }
-
-    #[test]
-    fn pitch_is_clamped_and_yaw_wraps() {
-        let (p, mut c) = walk();
-        c.step(
-            &p,
-            MoveIntent::default(),
-            LookIntent {
-                yaw_delta: -10.0,
-                pitch_delta: 1000.0,
-            },
-            0.0,
-            0.0,
-        );
-        assert_eq!(c.yaw, 350.0);
-        assert_eq!(c.pitch, p.max_pitch_degrees);
     }
 
     #[test]
@@ -301,7 +289,7 @@ mod tests {
                 right: 1.0,
                 ..MoveIntent::default()
             },
-            LookIntent::default(),
+            0.0,
             0.0,
             0.1,
         );

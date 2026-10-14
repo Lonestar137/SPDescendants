@@ -9,11 +9,17 @@ mod content;
 mod player;
 
 use bevy::asset::RenderAssetUsages;
+use bevy::math::Affine2;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
+use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
+
 use content::{CharacterAssets, DataSource, MaterialSpec};
-use player::{Player, drive_player, follow_camera, grab_cursor, toggle_cursor};
+use player::{
+    CameraRig, IdleBone, Player, animate_idle, drive_player, follow_camera, grab_cursor,
+    toggle_cursor,
+};
 use spdesc_data::texture::Texture;
 
 fn main() {
@@ -34,18 +40,24 @@ fn main() {
         })
         .insert_resource(ClearColor(Color::srgb(0.46, 0.55, 0.68)))
         .add_systems(Startup, (setup_scene, grab_cursor, spawn_character))
-        .add_systems(Update, (toggle_cursor, drive_player, follow_camera).chain())
+        .add_systems(
+            Update,
+            (toggle_cursor, drive_player, animate_idle, follow_camera).chain(),
+        )
         .run();
 }
 
-/// Camera, light, and the flat ground the MVP plays on.
+/// Camera, light, and the flat ground the MVP plays on. The ground is a tiled checker and there
+/// are a few pillars, so the third-person camera's horizontal orbit has something to read against.
 fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     commands.spawn((
         Camera3d::default(),
+        CameraRig::default(),
         Transform::from_xyz(0.0, 2.5, -5.0).looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
     ));
 
@@ -59,15 +71,59 @@ fn setup_scene(
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.9, 0.5, 0.0)),
     ));
 
-    // A large ground plane at Y = 0 (200 m square), the "basic map of any kind".
+    // A large checker ground plane at Y = 0 (200 m square), the "basic map of any kind".
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(200.0, 200.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.30, 0.34, 0.30),
+            base_color_texture: Some(images.add(checker_image(512, 64))),
+            uv_transform: Affine2::from_scale(Vec2::splat(50.0)),
             perceptual_roughness: 1.0,
             ..default()
         })),
     ));
+
+    // Reference pillars: without something to read against, the camera's horizontal orbit is
+    // invisible on a uniform plane.
+    let pillar = meshes.add(Cuboid::new(1.0, 4.0, 1.0));
+    let pillar_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.55, 0.30, 0.35),
+        perceptual_roughness: 0.6,
+        ..default()
+    });
+    for (x, z) in [(-8.0, -8.0), (8.0, -8.0), (-8.0, 8.0), (8.0, 8.0)] {
+        commands.spawn((
+            Mesh3d(pillar.clone()),
+            MeshMaterial3d(pillar_material.clone()),
+            Transform::from_xyz(x, 2.0, z),
+        ));
+    }
+}
+
+/// A two-tone checker image with `cell`-pixel squares.
+fn checker_image(size: u32, cell: u32) -> Image {
+    let mut data = vec![0u8; (size * size * 4) as usize];
+    for y in 0..size {
+        for x in 0..size {
+            let light = ((x / cell) + (y / cell)).is_multiple_of(2);
+            let v = if light { 0x6a } else { 0x50 };
+            let o = ((y * size + x) * 4) as usize;
+            data[o] = v;
+            data[o + 1] = v + 6;
+            data[o + 2] = v;
+            data[o + 3] = 255;
+        }
+    }
+    Image::new(
+        Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    )
 }
 
 /// Load the Ultimate Bunny from `GAME_DATA` and spawn the player, or fall back to a capsule so the
@@ -77,6 +133,7 @@ fn spawn_character(
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut inverse_bindposes: ResMut<Assets<SkinnedMeshInverseBindposes>>,
 ) {
     let assets = match build_character() {
         Ok(assets) => Some(assets),
@@ -86,39 +143,92 @@ fn spawn_character(
         }
     };
 
-    let mut entity = commands.spawn((
-        Player::default(),
-        Transform::default(),
-        Visibility::default(),
-    ));
+    let player = commands
+        .spawn((
+            Player::default(),
+            Transform::default(),
+            Visibility::default(),
+        ))
+        .id();
 
     match assets {
         Some(CharacterAssets {
             parts,
             materials: specs,
+            skeleton,
+            head_attach,
             feet_offset,
         }) => {
             info!(
-                "Ultimate Bunny: {} section mesh(es), {} material(s), feet offset {feet_offset:.3} m",
+                "Ultimate Bunny: {} section mesh(es), {} material(s), {} bones, feet offset {feet_offset:.3} m",
                 parts.len(),
-                specs.len()
+                specs.len(),
+                skeleton.names.len()
             );
             let handles: Vec<_> = specs
                 .into_iter()
                 .map(|spec| materials.add(build_material(&mut images, spec)))
                 .collect();
-            entity.with_children(|parent| {
-                for part in parts {
-                    parent.spawn((
+            let (head_parts, body_parts): (Vec<_>, Vec<_>) =
+                parts.into_iter().partition(|part| part.under_head);
+
+            // One entity per bone, parented into the hierarchy under the player, so the skinned
+            // mesh's joint matrices carry the player's world transform. Some bones get a small
+            // procedural idle.
+            let mut bones: Vec<Entity> = Vec::with_capacity(skeleton.names.len());
+            for (local, name) in skeleton.locals.iter().zip(&skeleton.names) {
+                let mut bone = commands.spawn((*local, Visibility::default()));
+                if let Some(idle) = idle_for(name, local.rotation) {
+                    bone.insert(idle);
+                }
+                bones.push(bone.id());
+            }
+            for (i, parent) in skeleton.parents.iter().enumerate() {
+                let parent_entity = if *parent >= 0 {
+                    bones[*parent as usize]
+                } else {
+                    player
+                };
+                commands.entity(bones[i]).insert(ChildOf(parent_entity));
+            }
+            let inverse = inverse_bindposes.add(SkinnedMeshInverseBindposes::from(
+                skeleton.inverse_bindposes,
+            ));
+
+            // The body: skinned sub-meshes on the player. The head: static sub-meshes on the head
+            // attach node, so they follow the head bone.
+            commands.entity(player).with_children(|parent| {
+                for part in body_parts {
+                    let mut child = parent.spawn((
                         Mesh3d(meshes.add(part.mesh)),
                         MeshMaterial3d(handles[part.material].clone()),
                         Transform::from_xyz(0.0, feet_offset, 0.0),
                     ));
+                    if part.skinned {
+                        child.insert(SkinnedMesh {
+                            inverse_bindposes: inverse.clone(),
+                            joints: bones.clone(),
+                        });
+                    }
                 }
             });
+            if let Some((index, local)) = head_attach {
+                let node = commands
+                    .spawn((local, Visibility::default(), ChildOf(bones[index])))
+                    .id();
+                commands.entity(node).with_children(|parent| {
+                    for part in head_parts {
+                        parent.spawn((
+                            Mesh3d(meshes.add(part.mesh)),
+                            MeshMaterial3d(handles[part.material].clone()),
+                            Transform::default(),
+                        ));
+                    }
+                });
+            }
         }
         None => {
-            entity.with_children(|parent| {
+            commands.entity(player).with_children(|parent| {
                 parent.spawn((
                     Mesh3d(meshes.add(Capsule3d::new(0.4, 1.0))),
                     MeshMaterial3d(materials.add(StandardMaterial {
@@ -130,6 +240,56 @@ fn spawn_character(
             });
         }
     }
+}
+
+/// Which bones get a procedural idle, and how much. The spine and limbs move a little, and the
+/// head follows the head bone through its attach node.
+fn idle_for(name: &str, base_rotation: Quat) -> Option<IdleBone> {
+    let n = name.to_ascii_lowercase();
+    if n.contains("socket") || n.contains("twist") || n.contains("shape") || n.contains("dummy") {
+        return None;
+    }
+    if n.contains("head") {
+        return Some(IdleBone::new(
+            base_rotation,
+            Vec3::new(0.02, 0.03, 0.02),
+            0.5,
+            0.8,
+        ));
+    }
+    if n.contains("upperarm") {
+        return Some(IdleBone::new(
+            base_rotation,
+            Vec3::new(0.015, 0.0, 0.05),
+            0.0,
+            1.1,
+        ));
+    }
+    if n.contains("lowerarm") || n.contains("forearm") {
+        return Some(IdleBone::new(
+            base_rotation,
+            Vec3::new(0.0, 0.0, 0.03),
+            1.7,
+            1.1,
+        ));
+    }
+    if n.contains("clavicle") {
+        return Some(IdleBone::new(
+            base_rotation,
+            Vec3::new(0.0, 0.012, 0.0),
+            0.9,
+            1.0,
+        ));
+    }
+    if n.contains("spine") {
+        return Some(IdleBone::new(
+            base_rotation,
+            Vec3::new(0.008, 0.012, 0.008),
+            0.3,
+            0.9,
+        ));
+    }
+    None
 }
 
 /// Turn a decoded [`Texture`] into a Bevy image. Base colours are sRGB; normal and packed maps
