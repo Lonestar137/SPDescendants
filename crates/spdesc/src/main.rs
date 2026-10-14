@@ -7,6 +7,7 @@
 
 mod combat;
 mod content;
+mod hair;
 mod player;
 
 use bevy::asset::RenderAssetUsages;
@@ -18,6 +19,7 @@ use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 
 use combat::{Weapon, age_effects, fire_weapon, retire_dead_enemies, spawn_enemies, tick_weapon};
 use content::{CharacterAssets, DataSource, MaterialSpec};
+use hair::{Hair, animate_hair};
 use player::{
     Animator, CameraRig, Player, animate_locomotion, drive_player, follow_camera, grab_cursor,
     toggle_cursor,
@@ -48,6 +50,7 @@ fn main() {
                 toggle_cursor,
                 drive_player,
                 animate_locomotion,
+                animate_hair,
                 follow_camera,
                 tick_weapon,
                 fire_weapon,
@@ -171,6 +174,7 @@ fn spawn_character(
             parts,
             materials: specs,
             skeleton,
+            head_skeleton,
             head_attach,
             feet_offset,
             animation,
@@ -239,6 +243,13 @@ fn spawn_character(
                     air_timer: 0.0,
                     land_timer: 0.0,
                     was_grounded: true,
+                    active: animation.idle,
+                    active_at: 0.0,
+                    active_looping: true,
+                    prev: animation.idle,
+                    prev_at: 0.0,
+                    prev_looping: true,
+                    blend: 1.0,
                 });
             }
 
@@ -263,15 +274,42 @@ fn spawn_character(
                 let node = commands
                     .spawn((local, Visibility::default(), ChildOf(bones[index])))
                     .id();
+                // The head's own skeleton lives on the attach node's frame, so the head skinning
+                // and the braid dynamics share one root — mirroring how the body's bones share the
+                // player's frame.
+                let mut head_bones: Vec<Entity> = Vec::with_capacity(head_skeleton.names.len());
+                for bone_local in &head_skeleton.locals {
+                    head_bones.push(commands.spawn((*bone_local, Visibility::default())).id());
+                }
+                for (i, parent) in head_skeleton.parents.iter().enumerate() {
+                    let parent_entity = if *parent >= 0 {
+                        head_bones[*parent as usize]
+                    } else {
+                        node
+                    };
+                    commands
+                        .entity(head_bones[i])
+                        .insert(ChildOf(parent_entity));
+                }
+                let head_inverse = inverse_bindposes.add(SkinnedMeshInverseBindposes::from(
+                    head_skeleton.inverse_bindposes.clone(),
+                ));
                 commands.entity(node).with_children(|parent| {
                     for part in head_parts {
                         parent.spawn((
                             Mesh3d(meshes.add(part.mesh)),
                             MeshMaterial3d(handles[part.material].clone()),
                             Transform::default(),
+                            SkinnedMesh {
+                                inverse_bindposes: head_inverse.clone(),
+                                joints: head_bones.clone(),
+                            },
                         ));
                     }
                 });
+                commands
+                    .entity(node)
+                    .insert(Hair::new(&head_skeleton, head_bones));
             }
         }
         None => {

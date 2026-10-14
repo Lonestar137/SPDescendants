@@ -34,26 +34,28 @@ const BODY_EXPORT: &str = "PC_004_U_CMN_BODY_001";
 pub const HEAD_PATH: &str =
     "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/001PC_004_U_CMN_HEAD_001.uasset";
 const HEAD_EXPORT: &str = "PC_004_U_CMN_HEAD_001";
-/// The body (skin) base-colour texture.
+/// The `Material/001` set: this mesh's slot names end in `_001`, so these are its textures (the
+/// `Material/002` set belongs to the `..._BODY_002` mesh and is a different skin).
+/// The body (skin) base-colour texture. Only `Material/002` carries the shared bare-body skin.
 pub const BODY_TEXTURE_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_Body_C.uasset";
 /// The PartA base-colour texture.
-pub const PARTA_TEXTURE_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_PartA_C.uasset";
+pub const PARTA_TEXTURE_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/001/TexturePC_004_U_CMN_001_PartA_C.uasset";
 /// The PartB base-colour texture.
-pub const PARTB_TEXTURE_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_PartB_C.uasset";
+pub const PARTB_TEXTURE_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/001/TexturePC_004_U_CMN_001_PartB_C.uasset";
 /// The helmet base-colour texture.
-pub const HELMET_TEXTURE_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_Helmet_C.uasset";
+pub const HELMET_TEXTURE_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/001/TexturePC_004_U_CMN_001_Helmet_C.uasset";
 /// The PartA normal map (BC5).
-const PARTA_NORMAL_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_PartA_N.uasset";
+const PARTA_NORMAL_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/001/TexturePC_004_U_CMN_001_PartA_N.uasset";
 /// The PartA packed map (R=AO, G=roughness, B=metallic).
-const PARTA_PACKED_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_PartA_P.uasset";
+const PARTA_PACKED_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/001/TexturePC_004_U_CMN_001_PartA_P.uasset";
 /// The PartB normal map (BC5).
-const PARTB_NORMAL_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_PartB_N.uasset";
+const PARTB_NORMAL_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/001/TexturePC_004_U_CMN_001_PartB_N.uasset";
 /// The PartB packed map.
-const PARTB_PACKED_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_PartB_P.uasset";
+const PARTB_PACKED_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/001/TexturePC_004_U_CMN_001_PartB_P.uasset";
 /// The helmet normal map (BC5).
-const HELMET_NORMAL_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_Helmet_N.uasset";
+const HELMET_NORMAL_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/001/TexturePC_004_U_CMN_001_Helmet_N.uasset";
 /// The helmet packed map.
-const HELMET_PACKED_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_Helmet_P.uasset";
+const HELMET_PACKED_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/001/TexturePC_004_U_CMN_001_Helmet_P.uasset";
 
 /// One drawable piece of the character: a bind-pose sub-mesh and how to shade it.
 pub struct Part {
@@ -86,6 +88,8 @@ pub struct CharacterAssets {
     pub materials: Vec<MaterialSpec>,
     /// The body skeleton, in Bevy space, for skinning and procedural posing.
     pub skeleton: Skeleton,
+    /// The head mesh's own skeleton (47 bones, including the two braid chains), in Bevy space.
+    pub head_skeleton: Skeleton,
     /// The head's attach node: the skeleton bone it follows and its transform relative to that
     /// bone. The head mesh is authored in model space, so the node's bind rotation cancels the
     /// bone's orientation; the head then follows the head bone's motion without twisting.
@@ -556,7 +560,9 @@ pub fn load_bunny(data: &mut DataSource) -> Result<CharacterAssets> {
     let mut feet = f32::MAX;
 
     let skeleton = build_skeleton(&body);
-    for (mesh, skinned) in [(&body, true), (&head, false)] {
+    // Every section is skinned now: the body to the body skeleton, the head to its own skeleton
+    // (which carries the braid bones the hair dynamics drive).
+    for (mesh, is_head) in [(&body, false), (&head, true)] {
         let lod = mesh.lods.first().context("mesh has no LOD 0")?;
         for section in &lod.sections {
             if section.disabled {
@@ -580,17 +586,17 @@ pub fn load_bunny(data: &mut DataSource) -> Result<CharacterAssets> {
             // Only the body (in component space) sets the floor; the head's local space would
             // skew it.
             let mut ignored_feet = f32::MAX;
-            let feet_ref = if skinned {
-                &mut feet
-            } else {
+            let feet_ref = if is_head {
                 &mut ignored_feet
+            } else {
+                &mut feet
             };
             parts.push(Part {
-                mesh: section_mesh(lod, section, skinned, feet_ref)
+                mesh: section_mesh(lod, section, true, feet_ref)
                     .with_context(|| format!("building section for slot {slot}"))?,
                 material,
-                skinned,
-                under_head: !skinned,
+                skinned: true,
+                under_head: is_head,
             });
         }
     }
@@ -603,6 +609,7 @@ pub fn load_bunny(data: &mut DataSource) -> Result<CharacterAssets> {
         parts,
         materials,
         skeleton,
+        head_skeleton: build_skeleton(&head),
         head_attach,
         feet_offset,
         animation,
@@ -937,6 +944,24 @@ mod tests {
         assert_eq!(a.clips[a.jump].num_samples, 31, "JumpStart");
         assert_eq!(a.clips[a.air].num_samples, 61, "JumpLoop");
         assert_eq!(a.clips[a.land].num_samples, 44, "JumpLandHard");
+    }
+
+    /// The head skeleton carries the braid chains the hair dynamics find by name; if the data ever
+    /// stops naming them `Bn_Hair*_Parent`, the physics would silently do nothing.
+    #[test]
+    fn head_skeleton_has_the_braid_chains() {
+        let Some(assets) = build_or_skip() else {
+            return;
+        };
+        let names = &assets.head_skeleton.names;
+        assert!(
+            names.iter().any(|n| n == "Bn_Hair30_Parent"),
+            "the head skeleton carries the Bn_Hair30 braid"
+        );
+        assert!(
+            names.iter().any(|n| n == "Bn_Hair34_Parent"),
+            "the head skeleton carries the Bn_Hair34 braid"
+        );
     }
 
     /// A pure conversion check that does not need data: game `(x, y, z)` cm maps to Bevy

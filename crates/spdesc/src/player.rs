@@ -42,7 +42,8 @@ pub struct CameraRig {
 }
 
 /// Poses the character's skeleton each frame from the decoded clips: idle/walk/run on the ground, a
-/// takeoff clip then an airborne loop while in the air, and a landing clip on touchdown.
+/// takeoff clip then an airborne loop while in the air, and a landing clip on touchdown. Changing
+/// clip cross-fades rather than snapping, so speeding up, slowing to a stop, and jumping all ease.
 #[derive(Component)]
 pub struct Animator {
     pub clips: Vec<AnimClip>,
@@ -63,6 +64,26 @@ pub struct Animator {
     pub land_timer: f32,
     /// Whether the character was on the ground last frame (to detect a touchdown).
     pub was_grounded: bool,
+    /// The clip playing this frame, how far into it, and whether it loops.
+    pub active: usize,
+    pub active_at: f32,
+    pub active_looping: bool,
+    /// The clip being cross-faded out of, frozen at its last time.
+    pub prev: usize,
+    pub prev_at: f32,
+    pub prev_looping: bool,
+    /// Cross-fade progress toward `active` (1.0 = settled).
+    pub blend: f32,
+}
+
+/// Seconds a clip change takes to cross-fade. TFD has no dedicated "stop" clip in the `MoveF_0LT`
+/// set (the BlendSpace blends speed down to the idle), so e.g. running to a stop is this fade.
+const BLEND_SECONDS: f32 = 0.18;
+
+/// Smoothstep, so a cross-fade eases in and out rather than moving linearly.
+fn smoothstep(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn clip_duration(clip: &AnimClip) -> f32 {
@@ -71,6 +92,16 @@ fn clip_duration(clip: &AnimClip) -> f32 {
     } else {
         clip.num_samples as f32 / clip.sample_rate
     }
+}
+
+/// The sample index of `clip` at time `at`, clamping a one-shot to its last frame.
+fn sample_at(clip: &AnimClip, at: f32, looping: bool) -> usize {
+    let at = if looping {
+        at
+    } else {
+        at.min(clip_duration(clip))
+    };
+    ((at * clip.sample_rate) as usize).min(clip.num_samples as usize - 1)
 }
 
 /// Which clip family the character is playing.
@@ -161,21 +192,45 @@ pub fn animate_locomotion(
             }
         };
 
+        // Start a cross-fade when the chosen clip changes.
+        if index != animator.active {
+            animator.prev = animator.active;
+            animator.prev_at = animator.active_at;
+            animator.prev_looping = animator.active_looping;
+            animator.blend = 0.0;
+        }
+        animator.active = index;
+        animator.active_at = at;
+        animator.active_looping = looping;
+
         let clip = &animator.clips[index];
-        // The takeoff and landing clips are one-shots: hold the last frame if the phase outlasts
-        // them (a long jump holds the takeoff; the landing always plays to its end).
-        let at = if looping {
-            at
-        } else {
-            at.min(clip_duration(clip))
-        };
-        let sample = ((at * clip.sample_rate) as usize).min(clip.num_samples as usize - 1);
-        let locals = crate::content::pose_bone_locals(
+        let sample = sample_at(clip, at, looping);
+        let mut locals = crate::content::pose_bone_locals(
             &animator.skeleton,
             clip,
             &animator.bone_to_track[index],
             sample,
         );
+
+        // Cross-fade out of the outgoing clip, so e.g. running to a stop eases instead of snapping.
+        if animator.blend < 1.0 {
+            animator.blend = (animator.blend + dt / BLEND_SECONDS).min(1.0);
+            let weight = smoothstep(animator.blend);
+            let outgoing_clip = &animator.clips[animator.prev];
+            let outgoing_sample = sample_at(outgoing_clip, animator.prev_at, animator.prev_looping);
+            let outgoing = crate::content::pose_bone_locals(
+                &animator.skeleton,
+                outgoing_clip,
+                &animator.bone_to_track[animator.prev],
+                outgoing_sample,
+            );
+            for (current, from) in locals.iter_mut().zip(outgoing.iter()) {
+                current.translation = from.translation.lerp(current.translation, weight);
+                current.rotation = from.rotation.slerp(current.rotation, weight);
+                current.scale = from.scale.lerp(current.scale, weight);
+            }
+        }
+
         for (entity, local) in animator.bones.iter().zip(locals.iter()) {
             if let Ok(mut transform) = transforms.get_mut(*entity) {
                 *transform = *local;
@@ -343,6 +398,17 @@ mod tests {
             Phase::Local,
             "locomotion on the ground"
         );
+    }
+
+    /// A cross-fade eases in and out (smoothstep) and clamps at the ends, so a clip change never
+    /// overshoots the target pose.
+    #[test]
+    fn crossfade_smoothstep_eases_and_clamps() {
+        assert_eq!(smoothstep(0.0), 0.0);
+        assert_eq!(smoothstep(1.0), 1.0);
+        assert_eq!(smoothstep(2.0), 1.0);
+        assert_eq!(smoothstep(-1.0), 0.0);
+        assert!((smoothstep(0.5) - 0.5).abs() < 1e-6);
     }
 
     /// The wiring this module owns: movement follows the input relative to the camera, and the
