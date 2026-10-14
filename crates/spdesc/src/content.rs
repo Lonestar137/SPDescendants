@@ -107,8 +107,8 @@ pub struct Animation {
     pub run: usize,
     /// Index of the jump/takeoff clip.
     pub jump: usize,
-    /// Index of the falling clip.
-    pub fall: usize,
+    /// Index of the airborne loop clip.
+    pub air: usize,
     /// Index of the landing clip.
     pub land: usize,
     /// Per clip, for each mesh bone, the track that drives it (clips animate different track sets).
@@ -624,10 +624,10 @@ fn load_animation(data: &mut DataSource, skeleton: &Skeleton) -> Option<Animatio
     let (walk, walk_map) = load(WALK_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
     let (run, run_map) = load(RUN_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
     let (jump, jump_map) = load(JUMP_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
-    let (fall, fall_map) = load(FALL_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
+    let (air, air_map) = load(AIR_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
     let (land, land_map) = load(LAND_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
-    let clips = vec![idle, walk, run, jump, fall, land];
-    let bone_to_track = vec![idle_map, walk_map, run_map, jump_map, fall_map, land_map];
+    let clips = vec![idle, walk, run, jump, air, land];
+    let bone_to_track = vec![idle_map, walk_map, run_map, jump_map, air_map, land_map];
     info!(
         "animation: {} clips, {} bones driven of {} (skeleton has {} bones)",
         clips.len(),
@@ -641,7 +641,7 @@ fn load_animation(data: &mut DataSource, skeleton: &Skeleton) -> Option<Animatio
         walk: 1,
         run: 2,
         jump: 3,
-        fall: 4,
+        air: 4,
         land: 5,
         bone_to_track,
     })
@@ -692,9 +692,9 @@ pub const WALK_CLIP_PATH: &str =
 /// Takeoff, the first part of a jump.
 pub const JUMP_CLIP_PATH: &str =
     "/M1/Content/Characters/PC/Anim/F/CMN/Sequence/JumpF_0LT_JumpStart.uasset";
-/// The airborne descent pose.
-pub const FALL_CLIP_PATH: &str =
-    "/M1/Content/Characters/PC/Anim/F/CMN/Sequence/JumpF_0LT_JumpEnd.uasset";
+/// The airborne loop that plays after takeoff until touchdown.
+pub const AIR_CLIP_PATH: &str =
+    "/M1/Content/Characters/PC/Anim/F/CMN/Sequence/JumpF_0LT_JumpLoop.uasset";
 /// Touchdown.
 pub const LAND_CLIP_PATH: &str =
     "/M1/Content/Characters/PC/Anim/F/CMN/Sequence/JumpF_0LT_JumpLandHard.uasset";
@@ -935,7 +935,7 @@ mod tests {
         let a = assets.animation.as_ref().expect("the clips load");
         assert_eq!(a.clips.len(), 6);
         assert_eq!(a.clips[a.jump].num_samples, 31, "JumpStart");
-        assert_eq!(a.clips[a.fall].num_samples, 50, "JumpEnd");
+        assert_eq!(a.clips[a.air].num_samples, 61, "JumpLoop");
         assert_eq!(a.clips[a.land].num_samples, 44, "JumpLandHard");
     }
 

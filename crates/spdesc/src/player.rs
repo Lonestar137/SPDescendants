@@ -4,9 +4,8 @@
 //! The app decides nothing here: `spdesc-game-core` owns how a character moves
 //! ([`spdesc_game_core::movement`]); this module reads a keyboard and mouse, converts them to a
 //! [`MoveIntent`] and a camera orbit, advances the simulation by the frame's delta, and copies the
-//! result onto a Bevy [`Transform`]. Movement is world-relative and the camera orbits
-//! independently, so moving the camera never changes where the character goes or which way it
-//! faces.
+//! result onto a Bevy [`Transform`]. Movement is camera-relative: forward is the way the camera
+//! faces, and the character turns to follow it, so the camera and the character move together.
 
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
@@ -42,8 +41,8 @@ pub struct CameraRig {
     pub pitch: f64,
 }
 
-/// Poses the character's skeleton each frame from the decoded clips: idle/walk/run on the ground,
-/// a takeoff clip while rising, a falling clip while descending, and a landing clip on touchdown.
+/// Poses the character's skeleton each frame from the decoded clips: idle/walk/run on the ground, a
+/// takeoff clip then an airborne loop while in the air, and a landing clip on touchdown.
 #[derive(Component)]
 pub struct Animator {
     pub clips: Vec<AnimClip>,
@@ -51,17 +50,15 @@ pub struct Animator {
     pub walk: usize,
     pub run: usize,
     pub jump: usize,
-    pub fall: usize,
+    pub air: usize,
     pub land: usize,
     pub bone_to_track: Vec<Vec<Option<usize>>>,
     pub bones: Vec<Entity>,
     pub skeleton: Skeleton,
     /// Looping locomotion time, seconds.
     pub time: f32,
-    /// Seconds since the jump took off (rising phase).
+    /// Seconds since the jump took off.
     pub air_timer: f32,
-    /// Seconds since the apex (falling phase).
-    pub fall_timer: f32,
     /// Seconds left of the landing one-shot.
     pub land_timer: f32,
     /// Whether the character was on the ground last frame (to detect a touchdown).
@@ -76,9 +73,38 @@ fn clip_duration(clip: &AnimClip) -> f32 {
     }
 }
 
+/// Which clip family the character is playing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Phase {
+    /// Grounded locomotion (idle/walk/run).
+    Local,
+    /// Airborne takeoff.
+    Jump,
+    /// Airborne loop.
+    Air,
+    /// Touchdown.
+    Land,
+}
+
+/// The animation phase from the character's grounded state and timers. `Land` requires being
+/// grounded, so a landing pose never plays in the air (only on touchdown).
+fn phase(grounded: bool, air_timer: f32, land_timer: f32, jump_duration: f32) -> Phase {
+    if !grounded {
+        if air_timer < jump_duration {
+            Phase::Jump
+        } else {
+            Phase::Air
+        }
+    } else if land_timer > 0.0 {
+        Phase::Land
+    } else {
+        Phase::Local
+    }
+}
+
 /// Advance and apply the character animation. Grounded: idle/walk/run, looped. Airborne: the
-/// takeoff clip while rising and the falling clip while descending, each a one-shot that holds its
-/// last frame. On touchdown: the landing clip once, then back to locomotion.
+/// takeoff clip once, then the airborne loop. On touchdown: the landing clip once, then back to
+/// locomotion. Nothing plays a landing pose until the character is actually on the ground.
 pub fn animate_locomotion(
     time: Res<Time>,
     mut players: Query<(&Player, &mut Animator)>,
@@ -89,53 +115,59 @@ pub fn animate_locomotion(
         let grounded = player.character.grounded;
         let velocity = player.character.velocity;
         let speed = velocity[0].hypot(velocity[1]);
-        let rising = velocity[2] > 0.0;
 
+        let jump_duration = clip_duration(&animator.clips[animator.jump]);
+        let air_duration = clip_duration(&animator.clips[animator.air]);
         let land_duration = clip_duration(&animator.clips[animator.land]);
+
         if grounded {
             if !animator.was_grounded {
                 animator.land_timer = land_duration;
             }
             animator.air_timer = 0.0;
-            animator.fall_timer = 0.0;
-        } else if rising {
-            animator.air_timer += dt;
         } else {
-            animator.fall_timer += dt;
+            animator.air_timer += dt;
         }
         animator.was_grounded = grounded;
 
         // Choose the clip and how far into it (seconds) we are.
-        let (index, at) = if !grounded {
-            if rising {
-                (animator.jump, animator.air_timer)
-            } else {
-                (animator.fall, animator.fall_timer)
+        let (index, at, looping) = match phase(
+            grounded,
+            animator.air_timer,
+            animator.land_timer,
+            jump_duration,
+        ) {
+            Phase::Jump => (animator.jump, animator.air_timer, false),
+            Phase::Air => {
+                let at = (animator.air_timer - jump_duration) % air_duration.max(1e-3);
+                (animator.air, at, true)
             }
-        } else if animator.land_timer > 0.0 {
-            let at = land_duration - animator.land_timer;
-            animator.land_timer = (animator.land_timer - dt).max(0.0);
-            (animator.land, at)
-        } else {
-            let index = if speed > 600.0 {
-                animator.run
-            } else if speed > 20.0 {
-                animator.walk
-            } else {
-                animator.idle
-            };
-            let duration = clip_duration(&animator.clips[index]);
-            animator.time = (animator.time + dt) % duration.max(1e-3);
-            (index, animator.time)
+            Phase::Land => {
+                let at = land_duration - animator.land_timer;
+                animator.land_timer = (animator.land_timer - dt).max(0.0);
+                (animator.land, at, false)
+            }
+            Phase::Local => {
+                let index = if speed > 600.0 {
+                    animator.run
+                } else if speed > 20.0 {
+                    animator.walk
+                } else {
+                    animator.idle
+                };
+                let duration = clip_duration(&animator.clips[index]);
+                animator.time = (animator.time + dt) % duration.max(1e-3);
+                (index, animator.time, true)
+            }
         };
 
         let clip = &animator.clips[index];
-        // The jump/fall/land clips are one-shots: hold the last frame if the phase outlasts them.
-        let one_shot = index == animator.jump || index == animator.fall || index == animator.land;
-        let at = if one_shot {
-            at.min(clip_duration(clip))
-        } else {
+        // The takeoff and landing clips are one-shots: hold the last frame if the phase outlasts
+        // them (a long jump holds the takeoff; the landing always plays to its end).
+        let at = if looping {
             at
+        } else {
+            at.min(clip_duration(clip))
         };
         let sample = ((at * clip.sample_rate) as usize).min(clip.num_samples as usize - 1);
         let locals = crate::content::pose_bone_locals(
@@ -231,6 +263,8 @@ pub fn drive_player(
         }
     }
 
+    let frame_yaw = rigs.single().map(|r| r.yaw).unwrap_or(0.0);
+
     let mut intent = MoveIntent {
         sprint: keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]),
         jump: keys.just_pressed(KeyCode::Space),
@@ -252,10 +286,9 @@ pub fn drive_player(
 
     for (mut player, mut transform) in &mut players {
         let params = player.params;
-        // World-relative movement: the keys pick a world direction and the camera orbits
-        // independently, so moving the camera does not change where the character goes. Pass `0`
-        // as the movement frame yaw.
-        player.character.step(&params, intent, 0.0, 0.0, dt);
+        // Camera-relative movement: forward is the way the camera faces, so the character turns to
+        // follow the camera and the sticks always steer relative to the view.
+        player.character.step(&params, intent, frame_yaw, 0.0, dt);
         transform.translation = position_to_bevy(player.character.position);
         transform.rotation =
             Quat::from_rotation_y(player.character.yaw.to_radians() as f32 + MODEL_YAW_OFFSET);
@@ -284,6 +317,33 @@ pub fn follow_camera(
 mod tests {
     use super::*;
     use core::time::Duration;
+
+    /// The animator never plays a landing pose in the air: on the ground it is idle/walk/run, or a
+    /// landing once; airborne it is takeoff then the airborne loop.
+    #[test]
+    fn landing_phase_only_happens_on_the_ground() {
+        assert_eq!(
+            phase(false, 0.1, 0.0, 1.0),
+            Phase::Jump,
+            "takeoff while rising"
+        );
+        assert_eq!(
+            phase(false, 1.5, 0.0, 1.0),
+            Phase::Air,
+            "air loop after takeoff"
+        );
+        assert_eq!(
+            phase(false, 1.5, 1.0, 1.0),
+            Phase::Air,
+            "a landing timer must be ignored in the air"
+        );
+        assert_eq!(phase(true, 0.0, 1.0, 1.0), Phase::Land, "land on touchdown");
+        assert_eq!(
+            phase(true, 0.0, 0.0, 1.0),
+            Phase::Local,
+            "locomotion on the ground"
+        );
+    }
 
     /// The wiring this module owns: movement follows the input relative to the camera, and the
     /// mouse orbits the camera without turning the character. Proven headless.
@@ -338,8 +398,8 @@ mod tests {
             "the character does not turn with the camera"
         );
 
-        // Now forward input still goes along world +X: the camera orbits independently and does
-        // not steer the character.
+        // Camera-relative: forward now follows the orbited camera, so the step gains a -Z (game
+        // +Y) component instead of staying on +X.
         app.world_mut()
             .resource_mut::<AccumulatedMouseMotion>()
             .delta = Vec2::ZERO;
@@ -349,16 +409,19 @@ mod tests {
         app.update();
         let transform = *app.world().entity(player).get::<Transform>().unwrap();
         assert!(
-            transform.translation.z.abs() < 1e-4 && transform.translation.x > 0.39,
-            "world-relative movement must not follow the camera, got {:?}",
+            transform.translation.z < -0.01,
+            "camera-relative movement must follow the camera yaw, got {:?}",
             transform.translation
         );
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
             .release(KeyCode::KeyW);
 
-        // "Right" moves the character to the player's right: in the game's left-handed frame that
-        // is -Y (which is what the forward-facing camera shows on screen as right).
+        // "Right" moves the character to the player's right: at yaw 0 the game's left-handed frame
+        // puts it along -Y (what the forward-facing camera shows on screen as right).
+        if let Some(mut rig) = app.world_mut().get_mut::<CameraRig>(camera) {
+            *rig = CameraRig::default();
+        }
         let before = app
             .world()
             .entity(player)
@@ -379,7 +442,7 @@ mod tests {
             .position;
         assert!(
             after[1] < before[1] - 1.0 && (after[0] - before[0]).abs() < 1e-4,
-            "right must move toward -Y, got {before:?} -> {after:?}"
+            "right must move toward -Y at yaw 0, got {before:?} -> {after:?}"
         );
     }
 }
