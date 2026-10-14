@@ -1,10 +1,19 @@
 //! `spdesc` — the SPDescendants client.
 //!
-//! Presentation only: the simulation lives in `spdesc-game-core` and is Bevy-free. The app
-//! resolves the read-only `GAME_DATA` folder through `spdesc_game_core::game_data` and never
-//! writes into it.
+//! Presentation only: the simulation lives in `spdesc-game-core` and is Bevy-free, and the asset
+//! formats live in `spdesc-data`. The app resolves the read-only `GAME_DATA` folder through
+//! `spdesc_game_core::game_data`, builds the Ultimate Bunny's meshes and textures from the
+//! player's install at startup, and presents a movable character on a flat ground plane.
 
+mod content;
+mod player;
+
+use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+
+use content::{CharacterAssets, DataSource, Shading};
+use player::{Player, drive_player, follow_camera, grab_cursor, toggle_cursor};
 
 fn main() {
     App::new()
@@ -15,25 +24,137 @@ fn main() {
             }),
             ..default()
         }))
-        .add_systems(Startup, (announce_game_data, spawn_camera))
+        .init_resource::<GlobalAmbientLight>()
+        .add_systems(Startup, (setup_scene, grab_cursor, spawn_character))
+        .add_systems(Update, (toggle_cursor, drive_player, follow_camera).chain())
         .run();
 }
 
-/// Report where the resolver landed, or where it looked: the first frame of evidence that the
-/// `GAME_DATA` rule is wired correctly on this machine.
-fn announce_game_data() {
-    match spdesc_game_core::game_data() {
-        Some(data) => info!("game data: {}", data.display()),
+/// Camera, light, and the flat ground the MVP plays on.
+fn setup_scene(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.spawn((
+        Camera3d::default(),
+        Transform::from_xyz(0.0, 2.5, -5.0).looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
+    ));
+
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 12_000.0,
+            shadow_maps_enabled: true,
+            ..default()
+        },
+        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.9, 0.5, 0.0)),
+    ));
+
+    // A large ground plane at Y = 0 (200 m square), the "basic map of any kind".
+    commands.spawn((
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(200.0, 200.0))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.30, 0.34, 0.30),
+            perceptual_roughness: 1.0,
+            ..default()
+        })),
+    ));
+}
+
+/// Load the Ultimate Bunny from `GAME_DATA` and spawn the player, or fall back to a capsule so the
+/// program is still playable when the data, key, or mapping is absent.
+fn spawn_character(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let assets = match build_character() {
+        Ok(assets) => Some(assets),
+        Err(error) => {
+            warn!("could not build the character from GAME_DATA ({error:#}); using a capsule");
+            None
+        }
+    };
+
+    let mut entity = commands.spawn((
+        Player::default(),
+        Transform::default(),
+        Visibility::default(),
+    ));
+
+    match assets {
+        Some(CharacterAssets {
+            parts,
+            materials: shading,
+            feet_offset,
+        }) => {
+            info!(
+                "Ultimate Bunny: {} section mesh(es), {} material(s), feet offset {feet_offset:.3} m",
+                parts.len(),
+                shading.len()
+            );
+            let handles: Vec<_> = shading
+                .into_iter()
+                .map(|s| {
+                    let material = match s {
+                        Shading::Texture(texture) => StandardMaterial {
+                            base_color_texture: Some(images.add(Image::new(
+                                Extent3d {
+                                    width: texture.width,
+                                    height: texture.height,
+                                    depth_or_array_layers: 1,
+                                },
+                                TextureDimension::D2,
+                                texture.rgba,
+                                TextureFormat::Rgba8UnormSrgb,
+                                RenderAssetUsages::default(),
+                            ))),
+                            perceptual_roughness: 0.85,
+                            ..default()
+                        },
+                        Shading::Solid(color) => StandardMaterial {
+                            base_color: Color::srgba(color[0], color[1], color[2], color[3]),
+                            perceptual_roughness: 0.7,
+                            ..default()
+                        },
+                    };
+                    materials.add(material)
+                })
+                .collect();
+            entity.with_children(|parent| {
+                for part in parts {
+                    parent.spawn((
+                        Mesh3d(meshes.add(part.mesh)),
+                        MeshMaterial3d(handles[part.material].clone()),
+                        Transform::from_xyz(0.0, feet_offset, 0.0),
+                    ));
+                }
+            });
+        }
         None => {
-            warn!("no game data found. Looked in, in order:");
-            for c in spdesc_game_core::candidates() {
-                warn!("  {}", c.display());
-            }
-            warn!("set GAME_DATA=<folder> (empty means 'no data' on purpose)");
+            entity.with_children(|parent| {
+                parent.spawn((
+                    Mesh3d(meshes.add(Capsule3d::new(0.4, 1.0))),
+                    MeshMaterial3d(materials.add(StandardMaterial {
+                        base_color: Color::srgb(0.8, 0.3, 0.6),
+                        ..default()
+                    })),
+                    Transform::from_xyz(0.0, 0.9, 0.0),
+                ));
+            });
         }
     }
 }
 
-fn spawn_camera(mut commands: Commands) {
-    commands.spawn(Camera2d);
+/// Open the container and the local state, then decode the character.
+fn build_character() -> anyhow::Result<CharacterAssets> {
+    let paks =
+        spdesc_data::paks_dir().ok_or_else(|| anyhow::anyhow!("no GAME_DATA folder found"))?;
+    let key = spdesc_data::key::aes_key()
+        .ok_or_else(|| anyhow::anyhow!("no container key (spdesc-config/keys.json)"))?;
+    let schema =
+        spdesc_data::mapping::load().map_err(|e| anyhow::anyhow!("no property mapping: {e}"))?;
+    let mut data = DataSource::open(&paks, key, schema)?;
+    content::load_bunny(&mut data)
 }

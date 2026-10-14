@@ -1,0 +1,29 @@
+[package]
+name = "spdesc-data"
+description = "Read GAME_DATA containers: IoStore TOC, Zen package summaries, and export maps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["dev"]
+# `dev` mirrors `spdesc-game-core`'s feature: it lets the AES-key resolver fall back to this
+# checkout's `spdesc-config/`. The app crate depends on this crate with `default-features = false`
+# so a shipped build never reads a source-tree path.
+dev = ["spdesc-game-core/dev"]
+
+[dependencies]
+anyhow.workspace = true
+# `default-features = false` here and in the app: this crate must never bake a source-tree path
+# into the resolver.
+spdesc-game-core = { path = "../spdesc-game-core", default-features = false }
+# MIT/Apache-2.0. Per-block AES-256-ECB, matching UE `FAES::DecryptData` block behavior.
+aes = "0.8"
+# MIT (declared in its manifest). Kraken/Mermaid/Selkie/Leviathan/LZNA/Bitknit Oodle decompressor.
+oozextract = "0.5.5"
+# The property schema is a user-supplied mapping in the local-state folder; parse it as JSON.
+serde_json = "1"
+
+[lints]
+workspace = true

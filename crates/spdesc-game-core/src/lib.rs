@@ -7,6 +7,7 @@
 //! input — never written, never committed).
 
 pub mod game_data;
+pub mod movement;
 
 // The `game_data_or_skip!` macro is `#[macro_export]`, so it is already re-exported at the crate
 // root: `spdesc_game_core::game_data_or_skip!(...)`.
