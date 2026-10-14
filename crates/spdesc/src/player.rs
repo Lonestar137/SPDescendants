@@ -103,6 +103,11 @@ pub fn animate_locomotion(
     }
 }
 
+/// The character mesh is authored facing the game's `+Y` (its right axis) rather than `+X` (the
+/// gameplay forward), so a fixed quarter turn aligns the model with the direction it moves. This
+/// is a presentation offset for this asset, applied to the entity's rotation only.
+const MODEL_YAW_OFFSET: f32 = -std::f32::consts::FRAC_PI_2;
+
 /// Game-space position (cm, `+Z` up) to Bevy's (m, `+Y` up): `(x, y, z)` → `(x, z, -y) * 0.01`.
 fn position_to_bevy(p: [f64; 3]) -> Vec3 {
     Vec3::new(
@@ -200,7 +205,8 @@ pub fn drive_player(
         let params = player.params;
         player.character.step(&params, intent, frame_yaw, 0.0, dt);
         transform.translation = position_to_bevy(player.character.position);
-        transform.rotation = Quat::from_rotation_y(player.character.yaw.to_radians() as f32);
+        transform.rotation =
+            Quat::from_rotation_y(player.character.yaw.to_radians() as f32 + MODEL_YAW_OFFSET);
     }
 }
 
