@@ -12,8 +12,9 @@ use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
-use content::{CharacterAssets, DataSource, Shading};
+use content::{CharacterAssets, DataSource, MaterialSpec};
 use player::{Player, drive_player, follow_camera, grab_cursor, toggle_cursor};
+use spdesc_data::texture::Texture;
 
 fn main() {
     App::new()
@@ -24,7 +25,14 @@ fn main() {
             }),
             ..default()
         }))
-        .init_resource::<GlobalAmbientLight>()
+        // A gentle sky fill and a soft clear colour: the default near-white ambient at full
+        // directional illuminance washed the character's colours out.
+        .insert_resource(GlobalAmbientLight {
+            color: Color::srgb(0.62, 0.70, 0.82),
+            brightness: 130.0,
+            ..default()
+        })
+        .insert_resource(ClearColor(Color::srgb(0.46, 0.55, 0.68)))
         .add_systems(Startup, (setup_scene, grab_cursor, spawn_character))
         .add_systems(Update, (toggle_cursor, drive_player, follow_camera).chain())
         .run();
@@ -43,7 +51,8 @@ fn setup_scene(
 
     commands.spawn((
         DirectionalLight {
-            illuminance: 12_000.0,
+            color: Color::srgb(1.0, 0.97, 0.90),
+            illuminance: 4_000.0,
             shadow_maps_enabled: true,
             ..default()
         },
@@ -86,41 +95,17 @@ fn spawn_character(
     match assets {
         Some(CharacterAssets {
             parts,
-            materials: shading,
+            materials: specs,
             feet_offset,
         }) => {
             info!(
                 "Ultimate Bunny: {} section mesh(es), {} material(s), feet offset {feet_offset:.3} m",
                 parts.len(),
-                shading.len()
+                specs.len()
             );
-            let handles: Vec<_> = shading
+            let handles: Vec<_> = specs
                 .into_iter()
-                .map(|s| {
-                    let material = match s {
-                        Shading::Texture(texture) => StandardMaterial {
-                            base_color_texture: Some(images.add(Image::new(
-                                Extent3d {
-                                    width: texture.width,
-                                    height: texture.height,
-                                    depth_or_array_layers: 1,
-                                },
-                                TextureDimension::D2,
-                                texture.rgba,
-                                TextureFormat::Rgba8UnormSrgb,
-                                RenderAssetUsages::default(),
-                            ))),
-                            perceptual_roughness: 0.85,
-                            ..default()
-                        },
-                        Shading::Solid(color) => StandardMaterial {
-                            base_color: Color::srgba(color[0], color[1], color[2], color[3]),
-                            perceptual_roughness: 0.7,
-                            ..default()
-                        },
-                    };
-                    materials.add(material)
-                })
+                .map(|spec| materials.add(build_material(&mut images, spec)))
                 .collect();
             entity.with_children(|parent| {
                 for part in parts {
@@ -144,6 +129,51 @@ fn spawn_character(
                 ));
             });
         }
+    }
+}
+
+/// Turn a decoded [`Texture`] into a Bevy image. Base colours are sRGB; normal and packed maps
+/// carry linear data.
+fn to_image(images: &mut Assets<Image>, texture: Texture, srgb: bool) -> Handle<Image> {
+    images.add(Image::new(
+        Extent3d {
+            width: texture.width,
+            height: texture.height,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        texture.rgba,
+        if srgb {
+            TextureFormat::Rgba8UnormSrgb
+        } else {
+            TextureFormat::Rgba8Unorm
+        },
+        RenderAssetUsages::default(),
+    ))
+}
+
+/// Build a Bevy material from a slot's decoded maps: base colour (sRGB), the game's packed map as
+/// both the metallic/roughness and occlusion texture, and the BC5 normal map.
+fn build_material(images: &mut Assets<Image>, spec: MaterialSpec) -> StandardMaterial {
+    let base_color_texture = spec.base.map(|t| to_image(images, t, true));
+    let metallic_roughness_texture = spec.packed.map(|t| to_image(images, t, false));
+    let occlusion_texture = metallic_roughness_texture.clone();
+    let normal_map_texture = spec.normal.map(|t| to_image(images, t, false));
+    StandardMaterial {
+        base_color: Color::srgba(spec.tint[0], spec.tint[1], spec.tint[2], spec.tint[3]),
+        base_color_texture,
+        metallic_roughness_texture,
+        occlusion_texture,
+        normal_map_texture,
+        perceptual_roughness: spec.roughness,
+        metallic: spec.metallic,
+        // Glass stands in as a translucent tint.
+        alpha_mode: if spec.tint[3] < 1.0 {
+            AlphaMode::Blend
+        } else {
+            AlphaMode::Opaque
+        },
+        ..default()
     }
 }
 

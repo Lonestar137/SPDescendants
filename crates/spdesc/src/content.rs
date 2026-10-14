@@ -32,10 +32,26 @@ const BODY_EXPORT: &str = "PC_004_U_CMN_BODY_001";
 pub const HEAD_PATH: &str =
     "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/001PC_004_U_CMN_HEAD_001.uasset";
 const HEAD_EXPORT: &str = "PC_004_U_CMN_HEAD_001";
-/// The body (skin) texture.
+/// The body (skin) base-colour texture.
 pub const BODY_TEXTURE_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_Body_C.uasset";
-/// The PartA texture.
-pub const PARTA_TEXTURE_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/001/TexturePC_004_U_CMN_001_PartA_C.uasset";
+/// The PartA base-colour texture.
+pub const PARTA_TEXTURE_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_PartA_C.uasset";
+/// The PartB base-colour texture.
+pub const PARTB_TEXTURE_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_PartB_C.uasset";
+/// The helmet base-colour texture.
+pub const HELMET_TEXTURE_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_Helmet_C.uasset";
+/// The PartA normal map (BC5).
+const PARTA_NORMAL_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_PartA_N.uasset";
+/// The PartA packed map (R=AO, G=roughness, B=metallic).
+const PARTA_PACKED_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_PartA_P.uasset";
+/// The PartB normal map (BC5).
+const PARTB_NORMAL_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_PartB_N.uasset";
+/// The PartB packed map.
+const PARTB_PACKED_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_PartB_P.uasset";
+/// The helmet normal map (BC5).
+const HELMET_NORMAL_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_Helmet_N.uasset";
+/// The helmet packed map.
+const HELMET_PACKED_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_Helmet_P.uasset";
 
 /// One drawable piece of the character: a bind-pose sub-mesh and how to shade it.
 pub struct Part {
@@ -44,18 +60,24 @@ pub struct Part {
     pub material: usize,
 }
 
-/// The kit needed to shade the character.
-pub enum Shading {
-    /// A decoded game texture.
-    Texture(Texture),
-    /// A flat colour, used when a slot's texture is not among the decoded ones.
-    Solid([f32; 4]),
+/// The PBR maps and scalars for one material slot. `base`/`normal`/`packed` are the decoded
+/// textures when the slot has them; `tint` is the flat colour otherwise.
+pub struct MaterialSpec {
+    pub base: Option<Texture>,
+    /// The game's packed map: R = ambient occlusion, G = roughness, B = metallic.
+    pub packed: Option<Texture>,
+    pub normal: Option<Texture>,
+    pub tint: [f32; 4],
+    /// Roughness scalar, multiplied by the packed map's G when present.
+    pub roughness: f32,
+    /// Metallic scalar, multiplied by the packed map's B when present.
+    pub metallic: f32,
 }
 
-/// A loaded character: its parts, their shading, and where its feet sit in Bevy space.
+/// A loaded character: its parts, their materials, and where its feet sit in Bevy space.
 pub struct CharacterAssets {
     pub parts: Vec<Part>,
-    pub materials: Vec<Shading>,
+    pub materials: Vec<MaterialSpec>,
     /// Vertical (Bevy `+Y`) offset, in metres, that puts the model's lowest point at zero.
     pub feet_offset: f32,
 }
@@ -308,6 +330,12 @@ fn section_mesh(
         };
         indices.push(local);
     }
+    // Unreal's front faces are clockwise; Bevy culls counter-clockwise back faces. The
+    // game-space → Bevy-space change is a pure rotation, so the winding must be reversed here or
+    // every front face is culled and the model renders as a hollow, see-through shell.
+    for triangle in indices.as_chunks_mut::<3>().0 {
+        triangle.swap(0, 2);
+    }
 
     let mut mesh = Mesh::new(
         bevy::render::mesh::PrimitiveTopology::TriangleList,
@@ -320,31 +348,77 @@ fn section_mesh(
     Ok(mesh)
 }
 
-/// The shading each material slot gets. The body's `Skin` uses the body texture and its `PartA`
-/// the PartA texture; every other slot (hair, helmet, and the glass the MVP does not decode) is a
-/// flat colour. Slots are matched case-insensitively on a substring, and a texture is taken at
-/// most once.
-fn shading_for(slot: &str, body: &mut Option<Texture>, part_a: &mut Option<Texture>) -> Shading {
+/// The decoded PBR maps for one material slot. Each slot's maps are consumed once, by the first
+/// section that names it.
+#[derive(Default)]
+struct Maps {
+    base: Option<Texture>,
+    normal: Option<Texture>,
+    packed: Option<Texture>,
+}
+
+/// Decode a slot's base colour, and its normal and packed maps when it has them.
+fn load_maps(
+    data: &mut DataSource,
+    base: &str,
+    normal: Option<&str>,
+    packed: Option<&str>,
+) -> Maps {
+    Maps {
+        base: data.texture(base).ok(),
+        normal: normal.and_then(|p| data.texture(p).ok()),
+        packed: packed.and_then(|p| data.texture(p).ok()),
+    }
+}
+
+/// The material a slot name gets, removing that slot's maps from `slots` on first use. Slots are
+/// matched case-insensitively on a substring; glass and hair are tints (their materials are not
+/// among the decoded maps).
+fn material_for(slot: &str, slots: &mut HashMap<&'static str, Maps>) -> MaterialSpec {
     let s = slot.to_ascii_lowercase();
-    if (s.contains("skin") || s.contains("body"))
-        && let Some(t) = body.take()
-    {
-        return Shading::Texture(t);
-    }
-    if s.contains("part")
-        && let Some(t) = part_a.take()
-    {
-        return Shading::Texture(t);
-    }
-    // A muted colour for hair, helmet, and the glass parts.
-    let color = if s.contains("glass") {
-        [0.55, 0.65, 0.8, 1.0]
-    } else if s.contains("hair") || s.contains("helmet") {
-        [0.12, 0.12, 0.14, 1.0]
+    let key = if s.contains("glass") || s.contains("hair") {
+        None
+    } else if s.contains("helmet") {
+        Some("helmet")
+    } else if s.contains("partb") {
+        Some("partb")
+    } else if s.contains("part") {
+        Some("parta")
+    } else if s.contains("skin") || s.contains("body") {
+        Some("skin")
     } else {
-        [0.6, 0.55, 0.5, 1.0]
+        None
     };
-    Shading::Solid(color)
+    if let Some(key) = key
+        && let Some(m) = slots.remove(key)
+    {
+        return MaterialSpec {
+            base: m.base,
+            packed: m.packed,
+            normal: m.normal,
+            tint: [1.0, 1.0, 1.0, 1.0],
+            // The maps carry the variation; the scalars only multiply them.
+            roughness: 1.0,
+            metallic: 1.0,
+        };
+    }
+    let (tint, roughness, metallic) = if s.contains("glass") {
+        ([0.45, 0.60, 0.75, 0.35], 0.05, 0.0)
+    } else if s.contains("hair") {
+        // Bunny's hair is near-black; its colour comes from a hair material this MVP does not
+        // decode, so a dark, semi-glossy neutral stands in.
+        ([0.09, 0.08, 0.10, 1.0], 0.45, 0.0)
+    } else {
+        ([0.6, 0.55, 0.5, 1.0], 0.6, 0.0)
+    };
+    MaterialSpec {
+        base: None,
+        packed: None,
+        normal: None,
+        tint,
+        roughness,
+        metallic,
+    }
 }
 
 /// Load the Ultimate Bunny body and head, decoding the two body textures as well. Every section of
@@ -352,15 +426,50 @@ fn shading_for(slot: &str, body: &mut Option<Texture>, part_a: &mut Option<Textu
 pub fn load_bunny(data: &mut DataSource) -> Result<CharacterAssets> {
     let body = data.mesh(BODY_PATH, BODY_EXPORT).context("body mesh")?;
     let head = data.mesh(HEAD_PATH, HEAD_EXPORT).context("head mesh")?;
-    let body_tex = data.texture(BODY_TEXTURE_PATH).ok();
-    let part_a_tex = data.texture(PARTA_TEXTURE_PATH).ok();
-    if body_tex.is_none() {
+    let mut slots: HashMap<&'static str, Maps> = HashMap::new();
+    slots.insert("skin", load_maps(data, BODY_TEXTURE_PATH, None, None));
+    slots.insert(
+        "parta",
+        load_maps(
+            data,
+            PARTA_TEXTURE_PATH,
+            Some(PARTA_NORMAL_PATH),
+            Some(PARTA_PACKED_PATH),
+        ),
+    );
+    slots.insert(
+        "partb",
+        load_maps(
+            data,
+            PARTB_TEXTURE_PATH,
+            Some(PARTB_NORMAL_PATH),
+            Some(PARTB_PACKED_PATH),
+        ),
+    );
+    slots.insert(
+        "helmet",
+        load_maps(
+            data,
+            HELMET_TEXTURE_PATH,
+            Some(HELMET_NORMAL_PATH),
+            Some(HELMET_PACKED_PATH),
+        ),
+    );
+    if slots["skin"].base.is_none() {
         warn!("body texture failed to decode; using flat colours");
     }
 
-    // The head is authored in the head bone's frame (its twintails reach 1.3 m below its origin),
-    // so it is placed with the body's head-bone bind transform.
-    let attach = head_bone(&body).map(|i| world_pose(&body, i));
+    // The head is authored in model space (its twintails reach 1.3 m below its origin), so it is
+    // placed at the body's head-bone bind *position*; the bone's orientation follows the neck and
+    // would twist the head, so only the translation is applied.
+    let attach = head_bone(&body).map(|i| {
+        let world = world_pose(&body, i);
+        Xform {
+            q: Xform::IDENTITY.q,
+            t: world.t,
+            s: Xform::IDENTITY.s,
+        }
+    });
     if let Some(a) = attach {
         info!(
             "head bone bind position: [{:.1}, {:.1}, {:.1}] cm",
@@ -368,11 +477,8 @@ pub fn load_bunny(data: &mut DataSource) -> Result<CharacterAssets> {
         );
     }
 
-    let mut materials: Vec<Shading> = Vec::new();
+    let mut materials: Vec<MaterialSpec> = Vec::new();
     let mut material_of_slot: HashMap<String, usize> = HashMap::new();
-    // Textures are consumed as they are assigned to the first slot that uses them.
-    let mut body_tex = body_tex;
-    let mut part_a_tex = part_a_tex;
     let mut parts: Vec<Part> = Vec::new();
     let mut feet = f32::MAX;
 
@@ -390,8 +496,8 @@ pub fn load_bunny(data: &mut DataSource) -> Result<CharacterAssets> {
             let material = match material_of_slot.get(&slot) {
                 Some(i) => *i,
                 None => {
-                    let shading = shading_for(&slot, &mut body_tex, &mut part_a_tex);
-                    materials.push(shading);
+                    let material_spec = material_for(&slot, &mut slots);
+                    materials.push(material_spec);
                     let i = materials.len() - 1;
                     material_of_slot.insert(slot.clone(), i);
                     i
@@ -467,11 +573,15 @@ mod tests {
             assets.parts.len()
         );
         assert!(
+            assets.materials.iter().any(|m| m.base.is_some()),
+            "at least one decoded game texture must shade a section"
+        );
+        assert!(
             assets
                 .materials
                 .iter()
-                .any(|s| matches!(s, Shading::Texture(_))),
-            "at least one decoded game texture must shade a section"
+                .any(|m| m.packed.is_some() && m.normal.is_some()),
+            "the armour slots must carry their packed and normal maps"
         );
         assert!(
             assets.feet_offset.is_finite() && assets.feet_offset.abs() < 5.0,
@@ -489,17 +599,27 @@ mod tests {
     }
 
     #[test]
-    fn slots_choose_their_shading() {
+    fn slots_choose_their_material() {
         let tex = || Texture {
             width: 1,
             height: 1,
             rgba: vec![0, 0, 0, 255],
         };
-        let skin = shading_for("Skin", &mut Some(tex()), &mut Some(tex()));
-        assert!(matches!(skin, Shading::Texture(_)));
-        let part = shading_for("PartA", &mut Some(tex()), &mut Some(tex()));
-        assert!(matches!(part, Shading::Texture(_)));
-        let glass = shading_for("GlassA", &mut Some(tex()), &mut Some(tex()));
-        assert!(matches!(glass, Shading::Solid(_)));
+        let maps = || Maps {
+            base: Some(tex()),
+            normal: None,
+            packed: None,
+        };
+        let mut slots: HashMap<&'static str, Maps> = HashMap::new();
+        slots.insert("skin", maps());
+        slots.insert("parta", maps());
+        slots.insert("partb", maps());
+        slots.insert("helmet", maps());
+        assert!(material_for("Skin", &mut slots).base.is_some());
+        assert!(material_for("PartA", &mut slots).base.is_some());
+        assert!(material_for("PartB", &mut slots).base.is_some());
+        assert!(material_for("Helmet", &mut slots).base.is_some());
+        assert!(material_for("Hair", &mut slots).base.is_none());
+        assert!(material_for("GlassA", &mut slots).base.is_none());
     }
 }

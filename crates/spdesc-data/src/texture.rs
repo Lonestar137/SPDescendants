@@ -352,8 +352,11 @@ fn assemble_mip0(
     }
 
     let decode: fn(&[u8], usize, usize) -> Result<Vec<u8>> = match layer0.as_str() {
-        "PF_DXT1" | "PF_BC4" => decode_bc1_mip,
-        _ => decode_bc3_mip,
+        "PF_DXT1" => decode_bc1_mip,
+        "PF_BC4" => decode_bc4_mip,
+        "PF_BC5" => decode_bc5_mip,
+        "PF_DXT5" | "PF_DXT3" => decode_bc3_mip,
+        other => bail!("no decoder for layer type {other}"),
     };
 
     let mut image = vec![0u8; width * height * 4];
@@ -410,6 +413,105 @@ fn lerp(a: &[u8; 4], b: &[u8; 4], n: u32, d: u32) -> [u8; 4] {
         out[i] = ((a[i] as u32 * (d - n) + b[i] as u32 * n) / d) as u8;
     }
     out
+}
+
+/// One BC4 block (8 bytes) → 16 single-channel values. The alpha-block half of BC3.
+fn decode_bc4_block(data: &[u8], at: usize) -> [u8; 16] {
+    let a0 = data[at] as u32;
+    let a1 = data[at + 1] as u32;
+    let mut bits = 0u64;
+    for k in 0..6 {
+        bits |= (data[at + 2 + k] as u64) << (8 * k);
+    }
+    let mut pal = [0u32; 8];
+    pal[0] = a0;
+    pal[1] = a1;
+    if a0 > a1 {
+        for k in 1..7 {
+            pal[k + 1] = ((7 - k as u32) * a0 + k as u32 * a1) / 7;
+        }
+    } else {
+        for k in 1..5 {
+            pal[k + 1] = ((5 - k as u32) * a0 + k as u32 * a1) / 5;
+        }
+        pal[6] = 0;
+        pal[7] = 255;
+    }
+    let mut out = [0u8; 16];
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = pal[((bits >> (3 * i)) & 7) as usize] as u8;
+    }
+    out
+}
+
+fn decode_bc4_mip(data: &[u8], w: usize, h: usize) -> Result<Vec<u8>> {
+    let (bx, by) = (w.div_ceil(4), h.div_ceil(4));
+    if data.len() < bx * by * 8 {
+        bail!("BC4 data {} < {}", data.len(), bx * by * 8);
+    }
+    let mut out = vec![0u8; w * h * 4];
+    for j in 0..by {
+        for i in 0..bx {
+            let block = decode_bc4_block(data, (j * bx + i) * 8);
+            for py in 0..4 {
+                let y = j * 4 + py;
+                if y >= h {
+                    continue;
+                }
+                for px in 0..4 {
+                    let x = i * 4 + px;
+                    if x >= w {
+                        continue;
+                    }
+                    let v = block[py * 4 + px];
+                    let o = (y * w + x) * 4;
+                    out[o..o + 4].copy_from_slice(&[v, v, v, 255]);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// BC5 (ATI2/3Dc): two BC4 blocks per 4×4, giving a two-channel map. Decoded as a tangent-space
+/// normal: `B = sqrt(1 - x² - y²)`, so the RGB image is a complete normal map for Bevy.
+fn decode_bc5_mip(data: &[u8], w: usize, h: usize) -> Result<Vec<u8>> {
+    let (bx, by) = (w.div_ceil(4), h.div_ceil(4));
+    if data.len() < bx * by * 16 {
+        bail!("BC5 data {} < {}", data.len(), bx * by * 16);
+    }
+    let mut out = vec![0u8; w * h * 4];
+    for j in 0..by {
+        for i in 0..bx {
+            let at = (j * bx + i) * 16;
+            let rx = decode_bc4_block(data, at);
+            let gy = decode_bc4_block(data, at + 8);
+            for py in 0..4 {
+                let y = j * 4 + py;
+                if y >= h {
+                    continue;
+                }
+                for px in 0..4 {
+                    let x = i * 4 + px;
+                    if x >= w {
+                        continue;
+                    }
+                    let k = py * 4 + px;
+                    // f64: the reconstruction must not round differently from the reference
+                    // decode at a truncation boundary.
+                    let nx = f64::from(rx[k]) / 127.5 - 1.0;
+                    let ny = f64::from(gy[k]) / 127.5 - 1.0;
+                    let nz = (1.0 - nx * nx - ny * ny).max(0.0).sqrt();
+                    let o = (y * w + x) * 4;
+                    out[o] = ((nx * 0.5 + 0.5) * 255.0) as u8;
+                    out[o + 1] = ((ny * 0.5 + 0.5) * 255.0) as u8;
+                    out[o + 2] = ((nz * 0.5 + 0.5) * 255.0) as u8;
+                    out[o + 3] = 255;
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn decode_bc1_mip(data: &[u8], w: usize, h: usize) -> Result<Vec<u8>> {
@@ -566,6 +668,18 @@ mod tests {
         assert_eq!((tex.width, tex.height), (2048, 2048));
         assert_eq!(fnv1a64(&tex.rgba), 0x96e9_9dbb_ab1d_bcd8);
         assert_eq!(tex.pixel(0, 0), Some([0xac, 0x87, 0x7d, 0xff]));
+    }
+
+    /// A BC5 normal map decodes with a reconstructed Z channel. The checksum ties the BC4/BC5
+    /// decoders to the reference decode used to identify the format.
+    #[test]
+    fn helmet_normal_map_decodes_bc5() {
+        let path = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_Helmet_N.uasset";
+        let Some(tex) = load_texture(path) else {
+            return;
+        };
+        assert_eq!((tex.width, tex.height), (2048, 2048));
+        assert_eq!(fnv1a64(&tex.rgba), 0xa43f_90df_f686_befe);
     }
 
     /// The PartA texture is BC3 (DXT5) and decodes to the PartA reference PNG.
