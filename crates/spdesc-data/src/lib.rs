@@ -16,6 +16,7 @@
 //! Format references: CUE4Parse `FIoStoreTocResource`, `FZenPackageSummary`, `FExportMapEntry`,
 //! `FMappedName`, and `FNameEntrySerialized`.
 
+pub mod anim;
 pub mod container;
 pub mod key;
 pub mod mapping;
