@@ -105,8 +105,8 @@ pub struct Animation {
     pub walk: usize,
     /// Index of the run clip.
     pub run: usize,
-    /// For each mesh bone, the clip track that drives it (by bone name).
-    pub bone_to_track: Vec<Option<usize>>,
+    /// Per clip, for each mesh bone, the track that drives it (clips animate different track sets).
+    pub bone_to_track: Vec<Vec<Option<usize>>>,
 }
 
 /// A skeleton's bind pose, converted to Bevy space: bone names and parents in order, each bone's
@@ -606,18 +606,23 @@ pub fn load_bunny(data: &mut DataSource) -> Result<CharacterAssets> {
 /// Best-effort load of the locomotion clips and the track↔bone mapping. Any failure yields `None`
 /// and the character is presented in its bind pose.
 fn load_animation(data: &mut DataSource, skeleton: &Skeleton) -> Option<Animation> {
-    let idle = data.clip(IDLE_CLIP_PATH).ok()?;
-    let num_tracks = idle.num_tracks as usize;
     let order = data.skeleton_order().ok()?;
-    let map = data.track_map(IDLE_CLIP_PATH, num_tracks).ok()?;
-    let walk = data.clip(WALK_CLIP_PATH).unwrap_or_else(|_| idle.clone());
-    let run = data.clip(RUN_CLIP_PATH).unwrap_or_else(|_| idle.clone());
-    let bone_to_track = bone_to_track(skeleton, &order, &map, num_tracks);
+    let mut load = |path: &str| -> Option<(AnimClip, Vec<Option<usize>>)> {
+        let clip = data.clip(path).ok()?;
+        let num_tracks = clip.num_tracks as usize;
+        let map = data.track_map(path, num_tracks).ok()?;
+        let bone_to_track = bone_to_track(skeleton, &order, &map, num_tracks);
+        Some((clip, bone_to_track))
+    };
+    let (idle, idle_map) = load(IDLE_CLIP_PATH)?;
+    let (walk, walk_map) = load(WALK_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
+    let (run, run_map) = load(RUN_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
     let clips = vec![idle, walk, run];
+    let bone_to_track = vec![idle_map, walk_map, run_map];
     info!(
         "animation: {} clips, {} bones driven of {} (skeleton has {} bones)",
         clips.len(),
-        bone_to_track.iter().filter(|m| m.is_some()).count(),
+        bone_to_track[0].iter().filter(|m| m.is_some()).count(),
         skeleton.names.len(),
         order.len()
     );
@@ -880,24 +885,12 @@ mod tests {
             return;
         };
         let animation = assets.animation.as_ref().expect("the idle clip loads");
-        let driven = animation
-            .bone_to_track
-            .iter()
-            .filter(|t| t.is_some())
-            .count();
+        let map = &animation.bone_to_track[animation.idle];
+        let driven = map.iter().filter(|t| t.is_some()).count();
         assert!(driven > 100, "only {driven} bones are driven by the clip");
-        let a = pose_bone_locals(
-            &assets.skeleton,
-            &animation.clips[animation.idle],
-            &animation.bone_to_track,
-            0,
-        );
-        let b = pose_bone_locals(
-            &assets.skeleton,
-            &animation.clips[animation.idle],
-            &animation.bone_to_track,
-            animation.clips[animation.idle].num_samples as usize / 2,
-        );
+        let clip = &animation.clips[animation.idle];
+        let a = pose_bone_locals(&assets.skeleton, clip, map, 0);
+        let b = pose_bone_locals(&assets.skeleton, clip, map, clip.num_samples as usize / 2);
         let moved = a
             .iter()
             .zip(&b)

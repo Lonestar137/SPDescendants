@@ -50,7 +50,7 @@ pub struct Animator {
     pub idle: usize,
     pub walk: usize,
     pub run: usize,
-    pub bone_to_track: Vec<Option<usize>>,
+    pub bone_to_track: Vec<Vec<Option<usize>>>,
     pub bones: Vec<Entity>,
     pub skeleton: Skeleton,
     pub time: f32,
@@ -92,7 +92,7 @@ pub fn animate_locomotion(
         let locals = crate::content::pose_bone_locals(
             &animator.skeleton,
             &animator.clips[index],
-            &animator.bone_to_track,
+            &animator.bone_to_track[index],
             sample,
         );
         for (entity, local) in animator.bones.iter().zip(locals.iter()) {
