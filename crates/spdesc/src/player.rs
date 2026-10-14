@@ -11,7 +11,10 @@ use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
+use spdesc_data::anim::AnimClip;
 use spdesc_game_core::movement::{Character, MoveIntent, MovementParams};
+
+use crate::content::Skeleton;
 
 /// Degrees of camera yaw/pitch per count of mouse motion.
 const MOUSE_SENSITIVITY: f64 = 0.12;
@@ -42,39 +45,61 @@ pub struct CameraRig {
 /// not frozen in its bind pose. Game-accurate animation (the shipped `AnimSequence` codec) is a
 /// later slice; this is the documented local stand-in.
 #[derive(Component)]
-pub struct IdleBone {
-    /// The bone's bind local rotation, which the oscillation is applied about.
-    pub base_rotation: Quat,
-    /// Peak rotation, radians per axis, in Euler `XYZ`.
-    pub amplitude: Vec3,
-    pub phase: f32,
-    /// Oscillation rate, radians per second.
-    pub speed: f32,
+pub struct Animator {
+    pub clips: Vec<AnimClip>,
+    pub idle: usize,
+    pub walk: usize,
+    pub run: usize,
+    pub bone_to_track: Vec<Option<usize>>,
+    pub bones: Vec<Entity>,
+    pub skeleton: Skeleton,
+    pub time: f32,
 }
 
-impl IdleBone {
-    pub fn new(base_rotation: Quat, amplitude: Vec3, phase: f32, speed: f32) -> Self {
-        Self {
-            base_rotation,
-            amplitude,
-            phase,
-            speed,
+/// Pose the skeleton from the active locomotion clip. Standing still plays the idle, moving plays
+/// the walk, and sprinting the run; the clip is looped and sampled by time.
+pub fn animate_locomotion(
+    time: Res<Time>,
+    mut players: Query<(&Player, &mut Animator)>,
+    mut transforms: Query<&mut Transform>,
+) {
+    let dt = time.delta_secs();
+    for (player, mut animator) in &mut players {
+        let speed = {
+            let v = player.character.velocity;
+            v[0].hypot(v[1])
+        };
+        let index = if speed > 600.0 {
+            animator.run
+        } else if speed > 20.0 {
+            animator.walk
+        } else {
+            animator.idle
+        };
+        if index >= animator.clips.len() {
+            continue;
         }
-    }
-}
-
-/// Oscillate every [`IdleBone`] about its bind rotation.
-pub fn animate_idle(time: Res<Time>, mut bones: Query<(&IdleBone, &mut Transform)>) {
-    let t = time.elapsed_secs();
-    for (idle, mut transform) in &mut bones {
-        let s = t * idle.speed + idle.phase;
-        transform.rotation = idle.base_rotation
-            * Quat::from_euler(
-                EulerRot::XYZ,
-                idle.amplitude.x * s.sin(),
-                idle.amplitude.y * (s * 0.8).sin(),
-                idle.amplitude.z * (s * 1.3).sin(),
-            );
+        let (num_samples, sample_rate) = {
+            let clip = &animator.clips[index];
+            (clip.num_samples, clip.sample_rate)
+        };
+        let duration = num_samples as f32 / sample_rate;
+        if duration <= 0.0 {
+            continue;
+        }
+        animator.time = (animator.time + dt) % duration;
+        let sample = ((animator.time * sample_rate) as usize).min(num_samples as usize - 1);
+        let locals = crate::content::pose_bone_locals(
+            &animator.skeleton,
+            &animator.clips[index],
+            &animator.bone_to_track,
+            sample,
+        );
+        for (entity, local) in animator.bones.iter().zip(locals.iter()) {
+            if let Ok(mut transform) = transforms.get_mut(*entity) {
+                *transform = *local;
+            }
+        }
     }
 }
 

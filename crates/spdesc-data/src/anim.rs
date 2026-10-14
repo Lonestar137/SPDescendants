@@ -297,8 +297,40 @@ struct FrameDecoder<'a> {
     has_segments: bool,
 }
 
-/// Find the embedded `compressed_tracks` buffer inside a cooked `UAnimSequence` export.
-///
+/// Locate a cooked `UAnimSequence`'s `CompressedTrackToSkeletonMapTable`: the ACL tracks animate a
+/// 306-bone subset of the skeleton, and this maps track `i` (in `compressed_tracks` order) to the
+/// skeleton's bone index. It is a run of `num_tracks` unique int32 bone indices preceded by their
+/// count, located structurally rather than at a baked offset.
+pub fn track_map(export: &[u8], num_tracks: usize) -> Option<Vec<u32>> {
+    use std::collections::HashSet;
+    if num_tracks == 0 || num_tracks > 1 << 20 {
+        return None;
+    }
+    let pattern = (num_tracks as u32).to_le_bytes();
+    for start in 0..export.len().saturating_sub(4 + num_tracks * 4) {
+        if export[start..start + 4] != pattern {
+            continue;
+        }
+        let mut seen = HashSet::with_capacity(num_tracks);
+        let mut values = Vec::with_capacity(num_tracks);
+        let mut ok = true;
+        for k in 0..num_tracks {
+            let at = start + 4 + k * 4;
+            let value = u32::from_le_bytes(export[at..at + 4].try_into().unwrap());
+            if value > 1 << 20 || !seen.insert(value) {
+                ok = false;
+                break;
+            }
+            values.push(value);
+        }
+        if ok {
+            return Some(values);
+        }
+    }
+    None
+}
+
+/// Find the embedded `compressed_tracks` buffer inside a cooked `UAnimSequence` export.///
 /// The sequence's native tail carries the ACL blob inline, behind a codec handle this parser does
 /// not need to read. A `compressed_tracks` buffer is self-describing and strongly tagged: it begins
 /// with its own size, then the `compressed_tracks` tag and version. The search accepts the first

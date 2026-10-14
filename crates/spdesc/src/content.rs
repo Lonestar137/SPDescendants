@@ -16,9 +16,10 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, bail};
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::VertexAttributeValues;
-use bevy::prelude::{Mat4, Mesh, Quat, Transform, Vec3, warn};
+use bevy::prelude::{Mat4, Mesh, Quat, Transform, Vec3, info, warn};
 use bevy::render::mesh::Indices;
 
+use spdesc_data::anim::AnimClip;
 use spdesc_data::container::IoStore;
 use spdesc_data::mesh::{MeshLod, Section, SkeletalMesh, Transform as UeTransform};
 use spdesc_data::property::{Ctx, Names, Natives, Reader, Schema};
@@ -91,6 +92,21 @@ pub struct CharacterAssets {
     pub head_attach: Option<(usize, Transform)>,
     /// Vertical (Bevy `+Y`) offset, in metres, that puts the model's lowest point at zero.
     pub feet_offset: f32,
+    /// Locomotion clips `[idle, walk, run]` and the bone↔track mapping, when the data resolves.
+    pub animation: Option<Animation>,
+}
+
+/// Locomotion clips and how their tracks map onto the mesh's bones.
+pub struct Animation {
+    pub clips: Vec<AnimClip>,
+    /// Index of the idle clip within `clips`.
+    pub idle: usize,
+    /// Index of the walk clip.
+    pub walk: usize,
+    /// Index of the run clip.
+    pub run: usize,
+    /// For each mesh bone, the clip track that drives it (by bone name).
+    pub bone_to_track: Vec<Option<usize>>,
 }
 
 /// A skeleton's bind pose, converted to Bevy space: bone names and parents in order, each bone's
@@ -101,6 +117,8 @@ pub struct Skeleton {
     pub parents: Vec<i32>,
     pub locals: Vec<Transform>,
     pub inverse_bindposes: Vec<Mat4>,
+    /// Each bone's bind local transform in the game frame (for posing an animation clip).
+    pub bind: Vec<UeTransform>,
 }
 
 /// The container, its directory index, and the global name table: everything the per-asset
@@ -219,6 +237,15 @@ impl Xform {
             ],
             t: pose.translation.map(f64::from),
             s: pose.scale.map(f64::from),
+        }
+    }
+
+    /// A game-space local transform from one decoded animation sample.
+    fn from_sample(sample: &spdesc_data::anim::TrackSample) -> Self {
+        Self {
+            q: sample.rotation.map(f64::from),
+            t: sample.translation.map(f64::from),
+            s: sample.scale.map(f64::from),
         }
     }
 
@@ -565,15 +592,43 @@ pub fn load_bunny(data: &mut DataSource) -> Result<CharacterAssets> {
         bail!("the character meshes have no renderable sections");
     }
     let feet_offset = if feet.is_finite() { -feet } else { 0.0 };
+    let animation = load_animation(data, &skeleton);
     Ok(CharacterAssets {
         parts,
         materials,
         skeleton,
         head_attach,
         feet_offset,
+        animation,
     })
 }
 
+/// Best-effort load of the locomotion clips and the track↔bone mapping. Any failure yields `None`
+/// and the character is presented in its bind pose.
+fn load_animation(data: &mut DataSource, skeleton: &Skeleton) -> Option<Animation> {
+    let idle = data.clip(IDLE_CLIP_PATH).ok()?;
+    let num_tracks = idle.num_tracks as usize;
+    let order = data.skeleton_order().ok()?;
+    let map = data.track_map(IDLE_CLIP_PATH, num_tracks).ok()?;
+    let walk = data.clip(WALK_CLIP_PATH).unwrap_or_else(|_| idle.clone());
+    let run = data.clip(RUN_CLIP_PATH).unwrap_or_else(|_| idle.clone());
+    let bone_to_track = bone_to_track(skeleton, &order, &map, num_tracks);
+    let clips = vec![idle, walk, run];
+    info!(
+        "animation: {} clips, {} bones driven of {} (skeleton has {} bones)",
+        clips.len(),
+        bone_to_track.iter().filter(|m| m.is_some()).count(),
+        skeleton.names.len(),
+        order.len()
+    );
+    Some(Animation {
+        clips,
+        idle: 0,
+        walk: 1,
+        run: 2,
+        bone_to_track,
+    })
+}
 /// The body skeleton in Bevy space: bone names and parents in order, each bone's local bind
 /// transform relative to its parent, and the inverse of each bone's world bind transform.
 fn build_skeleton(mesh: &SkeletalMesh) -> Skeleton {
@@ -601,7 +656,159 @@ fn build_skeleton(mesh: &SkeletalMesh) -> Skeleton {
         parents: mesh.bones.iter().map(|b| b.parent).collect(),
         locals,
         inverse_bindposes,
+        bind: mesh.poses.clone(),
     }
+}
+
+/// The character skeleton asset. An animation clip's tracks follow this asset's
+/// `FReferenceSkeleton` order, so it is the authority that maps a track index to a bone name.
+pub const SKELETON_PATH: &str = "/M1/Content/Characters/PCPC_Skeleton.uasset";
+/// The looped idle clip.
+pub const IDLE_CLIP_PATH: &str =
+    "/M1/Content/Characters/PC/Anim/F/CMN/Sequence/IdleF_0LT_Idle.uasset";
+/// A forward run clip (the `Move_1200` blend sample used while sprinting).
+pub const RUN_CLIP_PATH: &str =
+    "/M1/Content/Characters/PC/Anim/F/CMN/Sequence/MoveF_0LT_Move_1200_F.uasset";
+/// A forward walk clip.
+pub const WALK_CLIP_PATH: &str =
+    "/M1/Content/Characters/PC/Anim/F/CMN/Sequence/MoveF_0LT_Move_600_F.uasset";
+
+impl DataSource {
+    /// The ordered reference-skeleton bone names of the character skeleton (~4930 bones). An
+    /// animation's tracks select a subset of these via [`DataSource::track_map`].
+    pub fn skeleton_order(&mut self) -> Result<Vec<String>> {
+        let chunk = *self
+            .index
+            .get(SKELETON_PATH)
+            .with_context(|| format!("{SKELETON_PATH} is not in the directory index"))?;
+        let bytes = self.store.read_chunk(chunk as usize)?;
+        let package = ZenPackage::parse(&bytes, &self.global)?;
+        let i = package
+            .exports
+            .iter()
+            .position(|e| e.class.contains("Skeleton"))
+            .with_context(|| format!("no Skeleton export in {SKELETON_PATH}"))?;
+        let names = Names {
+            local: &package.local_names,
+            global: &self.global.names,
+        };
+        package
+            .export_data_variants(&bytes, i)
+            .into_iter()
+            .find_map(|data| spdesc_data::skeletal::reference_skeleton_order(data, names))
+            .map(|order| order.into_iter().map(|(name, _)| name).collect())
+            .with_context(|| format!("the reference skeleton was not found in {SKELETON_PATH}"))
+    }
+
+    /// The `CompressedTrackToSkeletonMapTable` of a clip: track `i` animates skeleton bone `map[i]`.
+    pub fn track_map(&mut self, path: &str, num_tracks: usize) -> Result<Vec<u32>> {
+        let chunk = *self
+            .index
+            .get(path)
+            .with_context(|| format!("{path} is not in the directory index"))?;
+        let bytes = self.store.read_chunk(chunk as usize)?;
+        let package = ZenPackage::parse(&bytes, &self.global)?;
+        let i = package
+            .exports
+            .iter()
+            .position(|e| e.class.contains("AnimSequence"))
+            .with_context(|| format!("no AnimSequence export in {path}"))?;
+        for data in package.export_data_variants(&bytes, i) {
+            if let Some(map) = spdesc_data::anim::track_map(data, num_tracks) {
+                return Ok(map);
+            }
+        }
+        bail!("{path} carries no track-to-skeleton map")
+    }
+
+    /// Decode one `UAnimSequence` clip to its ACL frames.
+    pub fn clip(&mut self, path: &str) -> Result<AnimClip> {
+        let chunk = *self
+            .index
+            .get(path)
+            .with_context(|| format!("{path} is not in the directory index"))?;
+        let bytes = self.store.read_chunk(chunk as usize)?;
+        let package = ZenPackage::parse(&bytes, &self.global)?;
+        let i = package
+            .exports
+            .iter()
+            .position(|e| e.class.contains("AnimSequence"))
+            .with_context(|| format!("no AnimSequence export in {path}"))?;
+        for data in package.export_data_variants(&bytes, i) {
+            if let Some(blob) = spdesc_data::anim::find_blob(data) {
+                return spdesc_data::anim::decode(blob).context("decoding an ACL clip");
+            }
+        }
+        bail!("{path} carries no ACL compressed_tracks blob")
+    }
+}
+
+/// Map each mesh bone to the animation track that drives it. `map[track]` is the skeleton bone the
+/// track animates; `order` names those bones, so a track reaches a mesh bone by name.
+pub fn bone_to_track(
+    skeleton: &Skeleton,
+    order: &[String],
+    map: &[u32],
+    num_tracks: usize,
+) -> Vec<Option<usize>> {
+    let mut out = vec![None; skeleton.names.len()];
+    for (track, bone_index) in map.iter().enumerate().take(num_tracks) {
+        let Some(name) = order.get(*bone_index as usize) else {
+            continue;
+        };
+        if let Some(bone) = skeleton.names.iter().position(|n| n == name) {
+            out[bone] = Some(track);
+        }
+    }
+    out
+}
+
+/// Pose every mesh bone for one frame of `clip`: bones with a mapped track take the clip's local
+/// transform, the rest keep their bind pose. The game-space locals are composed up the mesh
+/// hierarchy and converted to Bevy bone-local transforms.
+pub fn pose_bone_locals(
+    skeleton: &Skeleton,
+    clip: &AnimClip,
+    bone_to_track: &[Option<usize>],
+    sample: usize,
+) -> Vec<Transform> {
+    let n = skeleton.names.len();
+    let num_tracks = clip.num_tracks as usize;
+    let frame = &clip.samples[sample.min(clip.num_samples as usize - 1) * num_tracks..];
+    let mut local_game = Vec::with_capacity(n);
+    for bone in 0..n {
+        let posed = match bone_to_track.get(bone).copied().flatten() {
+            Some(track) if track < frame.len() => Some(Xform::from_sample(&frame[track])),
+            _ => None,
+        };
+        local_game.push(posed.unwrap_or_else(|| Xform::local(&skeleton.bind[bone])));
+    }
+    let mut world_game = vec![Xform::IDENTITY; n];
+    for bone in 0..n {
+        let parent = skeleton.parents[bone];
+        world_game[bone] = if parent >= 0 {
+            world_game[parent as usize].compose(&local_game[bone])
+        } else {
+            local_game[bone]
+        };
+    }
+    let world_bevy: Vec<Mat4> = world_game.iter().map(|x| x.to_bevy_mat4()).collect();
+    (0..n)
+        .map(|bone| {
+            let parent = skeleton.parents[bone];
+            let local = if parent >= 0 {
+                world_bevy[parent as usize].inverse() * world_bevy[bone]
+            } else {
+                world_bevy[bone]
+            };
+            let (scale, rotation, translation) = local.to_scale_rotation_translation();
+            Transform {
+                translation,
+                rotation,
+                scale,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -663,6 +870,45 @@ mod tests {
             assets.feet_offset.is_finite() && assets.feet_offset.abs() < 5.0,
             "feet offset {} m is implausible",
             assets.feet_offset
+        );
+    }
+
+    /// Posing the idle clip drives the mesh bones and changes them frame to frame.
+    #[test]
+    fn bunny_animation_poses_and_moves_its_bones() {
+        let Some(assets) = build_or_skip() else {
+            return;
+        };
+        let animation = assets.animation.as_ref().expect("the idle clip loads");
+        let driven = animation
+            .bone_to_track
+            .iter()
+            .filter(|t| t.is_some())
+            .count();
+        assert!(driven > 100, "only {driven} bones are driven by the clip");
+        let a = pose_bone_locals(
+            &assets.skeleton,
+            &animation.clips[animation.idle],
+            &animation.bone_to_track,
+            0,
+        );
+        let b = pose_bone_locals(
+            &assets.skeleton,
+            &animation.clips[animation.idle],
+            &animation.bone_to_track,
+            animation.clips[animation.idle].num_samples as usize / 2,
+        );
+        let moved = a
+            .iter()
+            .zip(&b)
+            .filter(|(x, y)| {
+                x.translation.distance(y.translation) > 1e-3
+                    || x.rotation.angle_between(y.rotation) > 1e-3
+            })
+            .count();
+        assert!(
+            moved > 3,
+            "the idle changes only {moved} bone poses over half a loop"
         );
     }
 

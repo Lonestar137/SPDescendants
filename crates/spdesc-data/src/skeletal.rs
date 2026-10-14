@@ -310,15 +310,72 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
+/// Locate a `USkeleton`'s ordered reference-skeleton bone list in a cooked export.
+///
+/// A cooked `USkeleton` does not carry its `FReferenceSkeleton` as a tagged property: the ordered
+/// bones live in the native tail as a run of `FMeshBoneInfo` records (an 8-byte `FMappedName` and an
+/// `int32` parent). The run is located structurally rather than by a baked offset: it begins at a
+/// record whose parent is `-1` (the single root) and continues while each parent is `-1` or an
+/// earlier index. Returns `(name, parent)` in bone order.
+pub fn reference_skeleton_order(
+    export: &[u8],
+    names: crate::property::Names,
+) -> Option<Vec<(String, i32)>> {
+    let record = |at: usize| -> Option<(String, i32)> {
+        if at + 12 > export.len() {
+            return None;
+        }
+        let raw = u32::from_le_bytes(export[at..at + 4].try_into().unwrap());
+        let extra = u32::from_le_bytes(export[at + 4..at + 8].try_into().unwrap());
+        let parent = i32::from_le_bytes(export[at + 8..at + 12].try_into().unwrap());
+        let idx = (raw & 0x3fff_ffff) as usize;
+        let table = if raw >> 30 != 0 {
+            names.global
+        } else {
+            names.local
+        };
+        let base = table.get(idx)?;
+        if base.is_empty() {
+            return None;
+        }
+        let name = if extra > 0 {
+            format!("{base}_{}", extra - 1)
+        } else {
+            base.clone()
+        };
+        Some((name, parent))
+    };
+    // The run begins at the single root (parent `-1`) and continues while each parent is `-1` or an
+    // earlier index; the longest such run is the skeleton.
+    let mut best = Vec::new();
+    for start in 0..export.len().saturating_sub(12) {
+        if i32::from_le_bytes(export[start + 8..start + 12].try_into().unwrap()) != -1 {
+            continue;
+        }
+        let mut run = Vec::new();
+        while let Some((name, parent)) = record(start + run.len() * 12) {
+            if parent == -1 && !run.is_empty() {
+                break;
+            }
+            if parent != -1 && !(parent >= 0 && (parent as usize) < run.len()) {
+                break;
+            }
+            run.push((name, parent));
+        }
+        if run.len() > best.len() {
+            best = run;
+        }
+    }
+    (!best.is_empty()).then_some(best)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::container::IoStore;
     use crate::property::{Ctx, read_struct};
     use crate::zen::{GlobalNames, ZenPackage};
-
-    /// Read the Ultimate Bunny body's `USkeletalMesh` property block with the Rust reader and
-    /// assert it lands exactly on the native-tail boundary the research parser established
+    /// Read the Ultimate Bunny body's `USkeletalMesh` property block with the Rust reader and    /// assert it lands exactly on the native-tail boundary the research parser established
     /// (`2_771_863`, `MESH-FORMAT.md`). This ties the runtime reader to the validated oracle.
     #[test]
     fn body_property_block_ends_on_the_native_tail() {
@@ -374,6 +431,59 @@ mod tests {
             r.offset(),
             2_771_863,
             "property block must end where the native tail begins"
+        );
+    }
+
+    /// The `USkeleton` asset exposes its ordered reference-skeleton bones to the structural finder,
+    /// which is what maps an animation's track indices onto mesh bones.
+    #[test]
+    fn skeleton_asset_exposes_its_reference_bone_order() {
+        const SKELETON: &str = "/M1/Content/Characters/PCPC_Skeleton.uasset";
+        let Some(paks) = crate::paks_dir() else {
+            spdesc_game_core::skipped("no game data found", &spdesc_game_core::candidates());
+            return;
+        };
+        let Some(key) = crate::key::aes_key() else {
+            spdesc_game_core::skipped(
+                "no container key (spdesc-config/keys.json)",
+                &crate::key::config_root().into_iter().collect::<Vec<_>>(),
+            );
+            return;
+        };
+        let mut store = IoStore::open(&paks, key).expect("open IoStore");
+        let index = store.directory_index().expect("directory index");
+        let chunk = *index.get(SKELETON).expect("skeleton is indexed");
+        let bytes = store
+            .read_chunk(chunk as usize)
+            .expect("read skeleton chunk");
+        let global = GlobalNames::read(&paks).expect("global.ucas");
+        let package = ZenPackage::parse(&bytes, &global).expect("parse package");
+        let i = package
+            .exports
+            .iter()
+            .position(|e| e.class.contains("Skeleton"))
+            .expect("a Skeleton export");
+        let names = crate::property::Names {
+            local: &package.local_names,
+            global: &global.names,
+        };
+        let order = package
+            .export_data_variants(&bytes, i)
+            .into_iter()
+            .find_map(|data| reference_skeleton_order(data, names))
+            .expect("the reference skeleton is found");
+        assert!(
+            order.len() > 3000,
+            "the character skeleton has thousands of bones, got {}",
+            order.len()
+        );
+        assert!(
+            order.iter().any(|(n, _)| n == "Bip001-Head"),
+            "the reference skeleton must contain the head bone"
+        );
+        assert!(
+            order.iter().filter(|(_, p)| *p == -1).count() == 1,
+            "exactly one root bone"
         );
     }
 }

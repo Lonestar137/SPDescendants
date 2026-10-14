@@ -19,7 +19,7 @@ use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 use combat::{Weapon, age_effects, fire_weapon, retire_dead_enemies, spawn_enemies, tick_weapon};
 use content::{CharacterAssets, DataSource, MaterialSpec};
 use player::{
-    CameraRig, IdleBone, Player, animate_idle, drive_player, follow_camera, grab_cursor,
+    Animator, CameraRig, Player, animate_locomotion, drive_player, follow_camera, grab_cursor,
     toggle_cursor,
 };
 use spdesc_data::texture::Texture;
@@ -47,7 +47,7 @@ fn main() {
             (
                 toggle_cursor,
                 drive_player,
-                animate_idle,
+                animate_locomotion,
                 follow_camera,
                 tick_weapon,
                 fire_weapon,
@@ -173,6 +173,7 @@ fn spawn_character(
             skeleton,
             head_attach,
             feet_offset,
+            animation,
         }) => {
             info!(
                 "Ultimate Bunny: {} section mesh(es), {} material(s), {} bones, feet offset {feet_offset:.3} m",
@@ -188,15 +189,11 @@ fn spawn_character(
                 parts.into_iter().partition(|part| part.under_head);
 
             // One entity per bone, parented into the hierarchy under the player, so the skinned
-            // mesh's joint matrices carry the player's world transform. Some bones get a small
-            // procedural idle.
+            // mesh's joint matrices carry the player's world transform. The `Animator` poses them
+            // from the decoded clips.
             let mut bones: Vec<Entity> = Vec::with_capacity(skeleton.names.len());
-            for (local, name) in skeleton.locals.iter().zip(&skeleton.names) {
-                let mut bone = commands.spawn((*local, Visibility::default()));
-                if let Some(idle) = idle_for(name, local.rotation) {
-                    bone.insert(idle);
-                }
-                bones.push(bone.id());
+            for local in &skeleton.locals {
+                bones.push(commands.spawn((*local, Visibility::default())).id());
             }
             for (i, parent) in skeleton.parents.iter().enumerate() {
                 let parent_entity = if *parent >= 0 {
@@ -207,7 +204,7 @@ fn spawn_character(
                 commands.entity(bones[i]).insert(ChildOf(parent_entity));
             }
             let inverse = inverse_bindposes.add(SkinnedMeshInverseBindposes::from(
-                skeleton.inverse_bindposes,
+                skeleton.inverse_bindposes.clone(),
             ));
 
             // A stand-in weapon on the right hand bone, so the character visibly carries a gun. A
@@ -224,6 +221,19 @@ fn spawn_character(
                     Transform::from_xyz(0.0, 0.0, 0.12),
                     ChildOf(bones[hand]),
                 ));
+            }
+
+            if let Some(animation) = animation {
+                commands.entity(player).insert(Animator {
+                    clips: animation.clips,
+                    idle: animation.idle,
+                    walk: animation.walk,
+                    run: animation.run,
+                    bone_to_track: animation.bone_to_track,
+                    bones: bones.clone(),
+                    skeleton,
+                    time: 0.0,
+                });
             }
 
             // The body: skinned sub-meshes on the player. The head: static sub-meshes on the head
@@ -271,56 +281,6 @@ fn spawn_character(
             });
         }
     }
-}
-
-/// Which bones get a procedural idle, and how much. The spine and limbs move a little, and the
-/// head follows the head bone through its attach node.
-fn idle_for(name: &str, base_rotation: Quat) -> Option<IdleBone> {
-    let n = name.to_ascii_lowercase();
-    if n.contains("socket") || n.contains("twist") || n.contains("shape") || n.contains("dummy") {
-        return None;
-    }
-    if n.contains("head") {
-        return Some(IdleBone::new(
-            base_rotation,
-            Vec3::new(0.02, 0.03, 0.02),
-            0.5,
-            0.8,
-        ));
-    }
-    if n.contains("upperarm") {
-        return Some(IdleBone::new(
-            base_rotation,
-            Vec3::new(0.015, 0.0, 0.05),
-            0.0,
-            1.1,
-        ));
-    }
-    if n.contains("lowerarm") || n.contains("forearm") {
-        return Some(IdleBone::new(
-            base_rotation,
-            Vec3::new(0.0, 0.0, 0.03),
-            1.7,
-            1.1,
-        ));
-    }
-    if n.contains("clavicle") {
-        return Some(IdleBone::new(
-            base_rotation,
-            Vec3::new(0.0, 0.012, 0.0),
-            0.9,
-            1.0,
-        ));
-    }
-    if n.contains("spine") {
-        return Some(IdleBone::new(
-            base_rotation,
-            Vec3::new(0.008, 0.012, 0.008),
-            0.3,
-            0.9,
-        ));
-    }
-    None
 }
 
 /// Turn a decoded [`Texture`] into a Bevy image. Base colours are sRGB; normal and packed maps
