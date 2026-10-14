@@ -5,6 +5,7 @@
 //! `spdesc_game_core::game_data`, builds the Ultimate Bunny's meshes and textures from the
 //! player's install at startup, and presents a movable character on a flat ground plane.
 
+mod combat;
 mod content;
 mod player;
 
@@ -15,6 +16,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 
+use combat::{Weapon, age_effects, fire_weapon, retire_dead_enemies, spawn_enemies, tick_weapon};
 use content::{CharacterAssets, DataSource, MaterialSpec};
 use player::{
     CameraRig, IdleBone, Player, animate_idle, drive_player, follow_camera, grab_cursor,
@@ -42,7 +44,17 @@ fn main() {
         .add_systems(Startup, (setup_scene, grab_cursor, spawn_character))
         .add_systems(
             Update,
-            (toggle_cursor, drive_player, animate_idle, follow_camera).chain(),
+            (
+                toggle_cursor,
+                drive_player,
+                animate_idle,
+                follow_camera,
+                tick_weapon,
+                fire_weapon,
+                age_effects,
+                retire_dead_enemies,
+            )
+                .chain(),
         )
         .run();
 }
@@ -97,6 +109,8 @@ fn setup_scene(
             Transform::from_xyz(x, 2.0, z),
         ));
     }
+
+    spawn_enemies(&mut commands, &mut meshes, &mut materials);
 }
 
 /// A two-tone checker image with `cell`-pixel squares.
@@ -146,6 +160,7 @@ fn spawn_character(
     let player = commands
         .spawn((
             Player::default(),
+            Weapon::default(),
             Transform::default(),
             Visibility::default(),
         ))
@@ -194,6 +209,22 @@ fn spawn_character(
             let inverse = inverse_bindposes.add(SkinnedMeshInverseBindposes::from(
                 skeleton.inverse_bindposes,
             ));
+
+            // A stand-in weapon on the right hand bone, so the character visibly carries a gun. A
+            // real weapon mesh from GAME_DATA is a later slice (its own mesh and materials).
+            if let Some(hand) = skeleton.names.iter().position(|n| n == "Bip001-R-Hand") {
+                commands.spawn((
+                    Mesh3d(meshes.add(Cuboid::new(0.06, 0.10, 0.42))),
+                    MeshMaterial3d(materials.add(StandardMaterial {
+                        base_color: Color::srgb(0.12, 0.13, 0.15),
+                        metallic: 0.85,
+                        perceptual_roughness: 0.35,
+                        ..default()
+                    })),
+                    Transform::from_xyz(0.0, 0.0, 0.12),
+                    ChildOf(bones[hand]),
+                ));
+            }
 
             // The body: skinned sub-meshes on the player. The head: static sub-meshes on the head
             // attach node, so they follow the head bone.

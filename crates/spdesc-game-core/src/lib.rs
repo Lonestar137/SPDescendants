@@ -6,6 +6,7 @@
 //! [`game_data`] is this workspace's one resolver for the `GAME_DATA` folder (read-only runtime
 //! input — never written, never committed).
 
+pub mod combat;
 pub mod game_data;
 pub mod movement;
 

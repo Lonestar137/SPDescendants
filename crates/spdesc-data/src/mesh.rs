@@ -158,6 +158,8 @@ fn read_material(r: &mut Reader, names: Names) -> Result<Material> {
     })
 }
 
+/// Read an `FReferenceSkeleton`: the bones (name + parent) and their bind-pose locals, then the
+/// name-to-index map.
 fn read_reference_skeleton(r: &mut Reader, names: Names) -> Result<(Vec<Bone>, Vec<Transform>)> {
     let count = r.i32()?;
     if !(0..5000).contains(&count) {
