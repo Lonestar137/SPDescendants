@@ -425,11 +425,15 @@ struct Maps {
 /// The file-name fragments that identify a slot's textures, in the order they are tried. Glass and
 /// hair have no decoded maps (they are flat tints), so they want no fragments. Slot names vary a
 /// lot between characters (`PartA`, `part_a`, `MI_…_A`), so the trailing token counts too.
-fn slot_keywords(slot: &str) -> &'static [&'static str] {
+fn slot_keywords(slot: &str, on_head: bool) -> &'static [&'static str] {
     let s = slot.to_ascii_lowercase();
     let last = s.rsplit('_').next().unwrap_or("");
     if s.contains("glass") || s.contains("hair") || s.contains("fur") {
         &[]
+    } else if on_head {
+        // A head mesh's part slots (`PartA`/`PartB`/`Helmet`) are the head or helmet shell, whose
+        // texture is named `…_Head_C`/`…_Helmet_C` — never the body armour's `…_PartA_C`.
+        &["head", "helmet"]
     } else if s.contains("helmet") {
         &["helmet"]
     } else if last == "head" || s.contains("face") {
@@ -462,16 +466,17 @@ fn find_base(
     material_dir: &str,
     keywords: &[&str],
 ) -> Option<String> {
-    if keywords.is_empty() {
-        return None;
-    }
-    for key in index.keys() {
-        if !key.starts_with(material_dir) || !key.ends_with(".uasset") {
-            continue;
-        }
-        let name = key.rsplit('/').next().unwrap_or(key).to_ascii_lowercase();
-        if name.ends_with("_c.uasset") && keywords.iter().any(|k| name.contains(k)) {
-            return Some(key.clone());
+    // Keywords are tried in order, so a slot that names the head prefers `…_Head_C` over a
+    // sibling `…_Helmet_C` when both ship.
+    for keyword in keywords {
+        for key in index.keys() {
+            if !key.starts_with(material_dir) || !key.ends_with(".uasset") {
+                continue;
+            }
+            let name = key.rsplit('/').next().unwrap_or(key).to_ascii_lowercase();
+            if name.ends_with("_c.uasset") && name.contains(keyword) {
+                return Some(key.clone());
+            }
         }
     }
     None
@@ -501,9 +506,10 @@ fn material_for(
     data: &mut DataSource,
     material_dir: &str,
     slot: &str,
+    on_head: bool,
     cache: &mut HashMap<String, Maps>,
 ) -> MaterialSpec {
-    let keywords = slot_keywords(slot);
+    let keywords = slot_keywords(slot, on_head);
     if !keywords.is_empty() {
         let key = format!("{material_dir}|{}", keywords.join(","));
         let maps = cache
@@ -759,7 +765,7 @@ fn build_parts(
                 let spec = if attach == Attach::Face {
                     face_material(data, material_dir, &slot, cache)
                 } else {
-                    material_for(data, material_dir, &slot, cache)
+                    material_for(data, material_dir, &slot, attach == Attach::Head, cache)
                 };
                 materials.push(spec);
                 let i = materials.len() - 1;
@@ -1186,21 +1192,49 @@ mod tests {
     #[test]
     fn slots_choose_their_texture_keywords() {
         assert_eq!(
-            slot_keywords("PC_004_U_CMN_BODY_001_PartA"),
+            slot_keywords("PC_004_U_CMN_BODY_001_PartA", false),
             ["parta", "part_a"]
         );
-        assert_eq!(slot_keywords("PC_001_A_MF_001_part_b"), ["partb", "part_b"]);
-        assert_eq!(slot_keywords("PC_016_U_CMN_001_A"), ["parta", "part_a"]);
-        assert_eq!(slot_keywords("PC_016_U_CMN_001_B"), ["partb", "part_b"]);
         assert_eq!(
-            slot_keywords("PC_004_U_CMN_BODY_001_Skin"),
+            slot_keywords("PC_001_A_MF_001_part_b", false),
+            ["partb", "part_b"]
+        );
+        assert_eq!(
+            slot_keywords("PC_016_U_CMN_001_A", false),
+            ["parta", "part_a"]
+        );
+        assert_eq!(
+            slot_keywords("PC_016_U_CMN_001_B", false),
+            ["partb", "part_b"]
+        );
+        assert_eq!(
+            slot_keywords("PC_004_U_CMN_BODY_001_Skin", false),
             ["body", "skin"]
         );
-        assert_eq!(slot_keywords("PC_001_A_MF_001_Head"), ["head", "helmet"]);
-        assert_eq!(slot_keywords("PC_016_U_CMN_001_HEAD"), ["head", "helmet"]);
-        assert_eq!(slot_keywords("PC_004_U_CMN_HEAD_001_Helmet"), ["helmet"]);
-        assert!(slot_keywords("PC_004_U_CMN_HEAD_001_Hair").is_empty());
-        assert!(slot_keywords("PC_004_U_CMN_BODY_001_GlassA").is_empty());
-        assert!(slot_keywords("something_else").is_empty());
+        assert_eq!(
+            slot_keywords("PC_001_A_MF_001_Head", false),
+            ["head", "helmet"]
+        );
+        assert_eq!(
+            slot_keywords("PC_016_U_CMN_001_HEAD", false),
+            ["head", "helmet"]
+        );
+        assert_eq!(
+            slot_keywords("PC_004_U_CMN_HEAD_001_Helmet", false),
+            ["helmet"]
+        );
+        assert!(slot_keywords("PC_004_U_CMN_HEAD_001_Hair", false).is_empty());
+        assert!(slot_keywords("PC_004_U_CMN_BODY_001_GlassA", false).is_empty());
+        assert!(slot_keywords("something_else", false).is_empty());
+        // On the head tree, a part slot is the head shell, not the body armour.
+        assert_eq!(
+            slot_keywords("PC_015_U_CMN_HEAD_001_PartA", true),
+            ["head", "helmet"]
+        );
+        assert_eq!(
+            slot_keywords("PC_004_U_CMN_HEAD_001_Helmet", true),
+            ["head", "helmet"]
+        );
+        assert!(slot_keywords("PC_015_A_AGT_HEAD_001_hair", true).is_empty());
     }
 }
