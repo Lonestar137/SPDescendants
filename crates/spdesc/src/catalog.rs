@@ -3,7 +3,8 @@
 //! A skin is a body mesh, its matching head mesh, and the `Material/<id>/` folder its textures live
 //! in, all found under a character's `U/Skel/SKIN/<set>/` tree. A character also has independent
 //! **head** variants (hairstyles/helmets, `…/Skel/SKIN/<set>/…_HEAD_…`) and **face** (makeup)
-//! presets (`…/A/Skel/SKIN/Makeup/<preset>/`). The skin data assets would name these directly, but
+//! presets (the numbered folder holding the face albedo, at `…/A/Skel/SKIN/Makeup/<n>/` or
+//! `…/A/Skel/SKIN/Makeup/Material/<n>/`). The skin data assets would name these directly, but
 //! the local property mapping does not describe the struct the game ships, so this reads the
 //! convention the asset names already encode instead.
 //!
@@ -138,6 +139,27 @@ pub fn build(index: &HashMap<String, u32>, names: &HashMap<String, String>) -> V
             continue;
         }
 
+        // Makeup comes first: its presets sit under a folder literally named `Material`, which the
+        // skin-material rule below would otherwise claim.
+        if dir.contains("Makeup") {
+            // A makeup preset is the numbered folder holding the face albedo. Its depth varies —
+            // `…/Makeup/<preset>/…_C` for some characters, `…/Makeup/Material/<preset>/…_C` for
+            // others — and the bare `Makeup`/`Material` folders hold only material instances, so
+            // the albedo's own folder is the only reliable preset.
+            let folder = dir.rsplit('/').next().unwrap_or_default();
+            let lower = stem.to_ascii_lowercase();
+            if !folder.is_empty()
+                && folder.chars().all(|c| c.is_ascii_digit())
+                && lower.contains("makeup")
+                && lower.ends_with("_c")
+            {
+                faces
+                    .entry(character.to_string())
+                    .or_default()
+                    .insert(folder_of(path));
+            }
+            continue;
+        }
         if let Some((base, number)) = dir.split_once("/Material/") {
             if number.contains('/') {
                 continue;
@@ -149,16 +171,6 @@ pub fn build(index: &HashMap<String, u32>, names: &HashMap<String, String>) -> V
                 .or_default()
                 .entry(number.to_string())
                 .or_insert_with(|| folder_of(path));
-            continue;
-        }
-        if let Some((_, preset)) = dir.split_once("Makeup/") {
-            if preset.contains('/') {
-                continue;
-            }
-            faces
-                .entry(character.to_string())
-                .or_default()
-                .insert(folder_of(path));
             continue;
         }
         if is_auxiliary(stem) {
@@ -236,18 +248,20 @@ pub fn build(index: &HashMap<String, u32>, names: &HashMap<String, String>) -> V
             head_list.sort_by(|a, b| a.label.cmp(&b.label));
         }
 
-        let face_list: Vec<Variant> = faces
-            .get(id)
-            .map(|dirs| {
-                dirs.iter()
-                    .map(|dir| Variant {
-                        label: dir.rsplit('/').next().unwrap_or("face").to_string(),
-                        mesh: None,
-                        material_dir: dir.clone(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        // A preset can ship under both layouts (`…/Makeup/006` and `…/Makeup/Material/006`); the
+        // label is the preset number either way, so keep one of each.
+        let mut face_list: Vec<Variant> = Vec::new();
+        let mut face_labels = BTreeSet::new();
+        for dir in faces.get(id).into_iter().flatten() {
+            let label = dir.rsplit('/').next().unwrap_or("face").to_string();
+            if face_labels.insert(label.clone()) {
+                face_list.push(Variant {
+                    label,
+                    mesh: None,
+                    material_dir: dir.clone(),
+                });
+            }
+        }
 
         characters.push(Character {
             id: id.clone(),

@@ -10,6 +10,7 @@ mod combat;
 mod content;
 mod hair;
 mod player;
+mod settings;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::math::Affine2;
@@ -256,6 +257,45 @@ impl Menu {
         [self.character, self.skin, self.head, self.face] = selection;
     }
 
+    /// The current selection as it is written to disk, and applied from it.
+    fn saved(&self) -> settings::Selection {
+        settings::Selection {
+            character: self.character().map(|c| c.id.clone()).unwrap_or_default(),
+            skin: self.skin().map(|s| s.label.clone()).unwrap_or_default(),
+            head: self.head().map(|h| h.label.clone()).unwrap_or_default(),
+            face: self.face().map(|f| f.label.clone()).unwrap_or_default(),
+        }
+    }
+
+    /// Move the selection onto `saved`, per column and independently: a character that no longer
+    /// exists, or a skin its character no longer ships, leaves that column where it started rather
+    /// than failing the whole selection.
+    fn restore(&mut self, saved: &settings::Selection) {
+        if let Some(character) = self.characters.iter().position(|c| c.id == saved.character) {
+            self.character = character;
+        }
+        let found = {
+            let Some(character) = self.character() else {
+                return;
+            };
+            (
+                character.skins.iter().position(|s| s.label == saved.skin),
+                character.heads.iter().position(|h| h.label == saved.head),
+                character.faces.iter().position(|f| f.label == saved.face),
+            )
+        };
+        if let Some(skin) = found.0 {
+            self.skin = skin;
+        }
+        if let Some(head) = found.1 {
+            self.head = head;
+        }
+        if let Some(face) = found.2 {
+            self.face = face;
+        }
+        self.clamp();
+    }
+
     /// The meshes and folders the current selection resolves to.
     fn resolved(&self) -> Option<Resolved> {
         let skin = self.skin()?;
@@ -440,6 +480,17 @@ fn setup_character(
         {
             menu.skin = j;
         }
+    }
+    // The last applied selection wins over the default, so a choice survives a restart.
+    if let Some(saved) = settings::Selection::load() {
+        menu.restore(&saved);
+        info!(
+            "selection: {} {} / head {} / face {}",
+            menu.character().map(|c| c.name.clone()).unwrap_or_default(),
+            menu.skin().map(|s| s.label.clone()).unwrap_or_default(),
+            menu.head().map(|h| h.label.clone()).unwrap_or_default(),
+            menu.face().map(|f| f.label.clone()).unwrap_or_default(),
+        );
     }
     info!(
         "catalog: {} characters, e.g. {}",
@@ -807,6 +858,10 @@ fn rebuild_model(
     );
     match build_character(&resolved) {
         Ok(assets) => {
+            // Applied successfully, so remember it for the next run.
+            if let Err(error) = menu.saved().save() {
+                warn!("could not save the selection ({error:#})");
+            }
             model.root = Some(spawn_model(
                 &mut commands,
                 &mut meshes,

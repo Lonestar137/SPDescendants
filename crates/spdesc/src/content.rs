@@ -1470,6 +1470,17 @@ mod tests {
             catalog.iter().any(|c| c.skins.len() > 1),
             "a character with several skins is expected"
         );
+        // The makeup presets are numbered folders, sitting either at `Makeup/<n>` or
+        // `Makeup/Material/<n>`. A face list of one non-numeric entry means the layout was misread.
+        let faces = catalog.iter().map(|c| c.faces.len()).max().unwrap_or(0);
+        assert!(faces > 1, "only {faces} face preset(s) enumerated");
+        assert!(
+            catalog.iter().all(|c| c
+                .faces
+                .iter()
+                .all(|f| f.label.chars().all(|d| d.is_ascii_digit()))),
+            "a face preset's label is its numbered folder"
+        );
     }
 
     /// A weapon slot names its texture maps by variant (`A001`, `B001`), not by role.
