@@ -30,6 +30,8 @@ const MAX_PITCH: f64 = 80.0;
 pub struct Player {
     pub character: Character,
     pub params: MovementParams,
+    /// Whether the right mouse button is held: aim down sights.
+    pub aiming: bool,
 }
 
 /// The camera's orbit around the player, independent of the player's facing.
@@ -39,6 +41,8 @@ pub struct CameraRig {
     pub yaw: f64,
     /// Orbit pitch, degrees up.
     pub pitch: f64,
+    /// Aim-down-sights blend, 0 (hip) to 1 (over the shoulder and zoomed).
+    pub ads: f32,
 }
 
 /// Poses the character's skeleton each frame from the decoded clips: idle/walk/run on the ground, a
@@ -53,7 +57,13 @@ pub struct Animator {
     pub jump: usize,
     pub air: usize,
     pub land: usize,
+    pub aim: usize,
     pub bone_to_track: Vec<Vec<Option<usize>>>,
+    /// Which bones the aim pose overrides (the spine from `Spine1` up, arms and head).
+    pub upper: Vec<bool>,
+    /// The eased weight of the aim layer, and its looping time through the aim clip.
+    pub ads: f32,
+    pub aim_time: f32,
     pub bones: Vec<Entity>,
     pub skeleton: Skeleton,
     /// Looping locomotion time, seconds.
@@ -79,6 +89,33 @@ pub struct Animator {
 /// Seconds a clip change takes to cross-fade. TFD has no dedicated "stop" clip in the `MoveF_0LT`
 /// set (the BlendSpace blends speed down to the idle), so e.g. running to a stop is this fade.
 const BLEND_SECONDS: f32 = 0.18;
+/// Seconds the aim pose takes to raise into and back out of the upper body.
+const ADS_SECONDS: f32 = 0.14;
+/// The bone the aim layer starts at; it and its descendants take the aim pose.
+const UPPER_BODY_ROOT: &str = "Bip001-Spine1";
+
+/// The bones the aim pose overrides: `UPPER_BODY_ROOT` and every descendant (neck, head,
+/// clavicles, arms, hands, fingers). The pelvis and legs keep the locomotion pose, so the character
+/// still runs and jumps while aiming.
+pub fn upper_body_mask(skeleton: &Skeleton) -> Vec<bool> {
+    let n = skeleton.names.len();
+    let mut upper = vec![false; n];
+    let Some(root) = skeleton
+        .names
+        .iter()
+        .position(|name| name == UPPER_BODY_ROOT)
+    else {
+        return upper;
+    };
+    upper[root] = true;
+    for i in 0..n {
+        let parent = skeleton.parents[i];
+        if parent >= 0 && upper[parent as usize] {
+            upper[i] = true;
+        }
+    }
+    upper
+}
 
 /// Smoothstep, so a cross-fade eases in and out rather than moving linearly.
 fn smoothstep(t: f32) -> f32 {
@@ -231,6 +268,40 @@ pub fn animate_locomotion(
             }
         }
 
+        // Layer the aim-down-sights pose over the upper body, eased in and out, while the lower
+        // body keeps running the locomotion. Only the upper-body locals are replaced.
+        animator.ads = if player.aiming {
+            (animator.ads + dt / ADS_SECONDS).min(1.0)
+        } else {
+            (animator.ads - dt / ADS_SECONDS).max(0.0)
+        };
+        if animator.ads > 0.0 {
+            let duration = clip_duration(&animator.clips[animator.aim]);
+            animator.aim_time = (animator.aim_time + dt) % duration.max(1e-3);
+            let aim_locals = {
+                let aim = &animator.clips[animator.aim];
+                let sample = sample_at(aim, animator.aim_time, true);
+                crate::content::pose_bone_locals(
+                    &animator.skeleton,
+                    aim,
+                    &animator.bone_to_track[animator.aim],
+                    sample,
+                )
+            };
+            let weight = smoothstep(animator.ads);
+            for (local, aim_local) in locals
+                .iter_mut()
+                .zip(aim_locals.iter())
+                .zip(&animator.upper)
+                .filter(|(_, upper)| **upper)
+                .map(|((local, aim_local), _)| (local, aim_local))
+            {
+                local.translation = local.translation.lerp(aim_local.translation, weight);
+                local.rotation = local.rotation.slerp(aim_local.rotation, weight);
+                local.scale = local.scale.lerp(aim_local.scale, weight);
+            }
+        }
+
         for (entity, local) in animator.bones.iter().zip(locals.iter()) {
             if let Ok(mut transform) = transforms.get_mut(*entity) {
                 *transform = *local;
@@ -297,6 +368,7 @@ pub fn toggle_cursor(
 pub fn drive_player(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
+    buttons: Res<ButtonInput<MouseButton>>,
     mouse: Res<AccumulatedMouseMotion>,
     windows: Query<&CursorOptions, With<PrimaryWindow>>,
     mut rigs: Query<&mut CameraRig>,
@@ -316,6 +388,16 @@ pub fn drive_player(
             rig.pitch = (rig.pitch - f64::from(mouse.delta.y) * MOUSE_SENSITIVITY)
                 .clamp(-MAX_PITCH, MAX_PITCH);
         }
+    }
+
+    // Holding the right mouse aims down the sights; the camera slides over the shoulder and zooms.
+    let aiming = grabbed && buttons.pressed(MouseButton::Right);
+    for mut rig in &mut rigs {
+        rig.ads = if aiming {
+            (rig.ads + time.delta_secs() / ADS_SECONDS).min(1.0)
+        } else {
+            (rig.ads - time.delta_secs() / ADS_SECONDS).max(0.0)
+        };
     }
 
     let frame_yaw = rigs.single().map(|r| r.yaw).unwrap_or(0.0);
@@ -343,6 +425,7 @@ pub fn drive_player(
         let params = player.params;
         // Camera-relative movement: forward is the way the camera faces, so the character turns to
         // follow the camera and the sticks always steer relative to the view.
+        player.aiming = aiming;
         player.character.step(&params, intent, frame_yaw, 0.0, dt);
         transform.translation = position_to_bevy(player.character.position);
         transform.rotation =
@@ -350,28 +433,81 @@ pub fn drive_player(
     }
 }
 
+/// Where the camera sits, in metres: behind at `CAMERA_DISTANCE`, and over the right shoulder and
+/// closer at `ADS_DISTANCE`/`ADS_SHOULDER` while aiming.
+const ADS_DISTANCE: f32 = 1.9;
+const ADS_SHOULDER: f32 = 0.55;
+const ADS_TARGET_HEIGHT: f32 = 1.62;
+/// Field of view (radians) at the hip and while aiming.
+const HIP_FOV: f32 = 0.95;
+const ADS_FOV: f32 = 0.52;
+
 /// Place the camera on its orbit around the player, aimed at its upper body. The orbit is
-/// independent of the player's facing, so the player can be viewed from any side.
+/// independent of the player's facing, so the player can be viewed from any side. While aiming the
+/// camera slides over the right shoulder, closes in, and zooms, and it looks straight along the aim
+/// direction so the reticle and the shots agree.
 pub fn follow_camera(
     players: Query<&Player>,
     rigs: Query<&CameraRig>,
     mut cameras: Query<&mut Transform, (With<Camera3d>, Without<Player>)>,
+    mut projections: Query<&mut Projection, With<Camera3d>>,
 ) {
     let (Ok(player), Ok(rig), Ok(mut camera)) =
         (players.single(), rigs.single(), cameras.single_mut())
     else {
         return;
     };
+    let ads = rig.ads;
     let dir = look_direction_to_bevy(rig.yaw, rig.pitch);
-    let target = position_to_bevy(player.character.position) + Vec3::Y * CAMERA_TARGET_HEIGHT;
-    let eye = target - dir * CAMERA_DISTANCE;
-    *camera = Transform::from_translation(eye).looking_at(target, Vec3::Y);
+    let distance = CAMERA_DISTANCE * (1.0 - ads) + ADS_DISTANCE * ads;
+    let height = CAMERA_TARGET_HEIGHT * (1.0 - ads) + ADS_TARGET_HEIGHT * ads;
+    let target = position_to_bevy(player.character.position) + Vec3::Y * height;
+    // Over the shoulder: slide the eye to the right of the aim line, keeping the look direction, so
+    // the character sits to the left of the reticle.
+    let shoulder = dir.cross(Vec3::Y).normalize_or_zero() * ADS_SHOULDER * ads;
+    let eye = target - dir * distance + shoulder;
+    *camera = Transform::from_translation(eye).looking_at(eye + dir, Vec3::Y);
+    if let Ok(mut projection) = projections.single_mut()
+        && let Projection::Perspective(perspective) = &mut *projection
+    {
+        perspective.fov = HIP_FOV * (1.0 - ads) + ADS_FOV * ads;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use core::time::Duration;
+
+    /// The aim layer replaces only the spine-up bones; the pelvis and legs keep the locomotion.
+    #[test]
+    fn aim_layer_covers_the_upper_body_only() {
+        let names: Vec<String> = [
+            "Bip001-Pelvis",
+            "Bip001-Spine",
+            "Bip001-Spine1",
+            "Bip001-Spine2",
+            "Bip001-L-Thigh",
+            "Bip001-L-Clavicle",
+            "Bip001-L-UpperArm",
+            "Bip001-Head",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let skeleton = Skeleton {
+            names,
+            parents: vec![-1, 0, 1, 2, 0, 3, 5, 3],
+            locals: vec![Transform::default(); 8],
+            inverse_bindposes: vec![Mat4::IDENTITY; 8],
+            bind: Vec::new(),
+        };
+        assert_eq!(
+            upper_body_mask(&skeleton),
+            vec![false, false, true, true, false, true, true, true],
+            "the pelvis and thigh keep the locomotion; the spine up takes the aim pose"
+        );
+    }
 
     /// The animator never plays a landing pose in the air: on the ground it is idle/walk/run, or a
     /// landing once; airborne it is takeoff then the airborne loop.
@@ -417,6 +553,7 @@ mod tests {
     fn movement_follows_the_camera_and_the_mouse_orbits_it() {
         let mut app = App::new();
         app.init_resource::<ButtonInput<KeyCode>>();
+        app.init_resource::<ButtonInput<MouseButton>>();
         app.init_resource::<AccumulatedMouseMotion>();
         let mut time = Time::<()>::default();
         time.advance_by(Duration::from_millis(100));

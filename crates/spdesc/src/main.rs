@@ -19,7 +19,10 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 
-use combat::{Weapon, age_effects, fire_weapon, retire_dead_enemies, spawn_enemies, tick_weapon};
+use combat::{
+    Muzzle, Weapon, WeaponRig, age_effects, fire_weapon, retire_dead_enemies, spawn_enemies,
+    tick_weapon,
+};
 use content::{CharacterAssets, DataSource, MaterialSpec};
 use hair::{Hair, animate_hair};
 use player::{
@@ -45,13 +48,17 @@ fn main() {
             ..default()
         })
         .insert_resource(ClearColor(Color::srgb(0.46, 0.55, 0.68)))
-        .add_systems(Startup, (setup_scene, grab_cursor, setup_character))
+        .add_systems(
+            Startup,
+            (setup_scene, grab_cursor, setup_hud, setup_character),
+        )
         .add_systems(
             Update,
             (
                 menu_input,
                 rebuild_model,
                 draw_menu,
+                draw_hud,
                 (
                     toggle_cursor,
                     drive_player,
@@ -81,7 +88,11 @@ fn setup_scene(
 ) {
     commands.spawn((
         Camera3d::default(),
-        CameraRig::default(),
+        CameraRig {
+            yaw: 160.0,
+            pitch: -6.0,
+            ads: 0.0,
+        },
         Transform::from_xyz(0.0, 2.5, -5.0).looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
     ));
 
@@ -274,6 +285,96 @@ struct Model {
 #[derive(Component)]
 struct MenuText;
 
+/// The overlay text node the HUD (ammunition, reload) draws into.
+#[derive(Component)]
+struct HudText;
+
+/// The crosshair's reticle; hidden while the character menu is open.
+#[derive(Component)]
+struct Reticle;
+
+/// The crosshair and the ammunition readout.
+fn setup_hud(mut commands: Commands) {
+    commands
+        .spawn((
+            Reticle,
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Node {
+                    width: Val::Px(16.0),
+                    height: Val::Px(16.0),
+                    border: UiRect::all(Val::Px(2.0)),
+                    ..default()
+                },
+                BorderColor::from(Color::srgba(1.0, 1.0, 1.0, 0.85)),
+            ));
+        });
+    commands.spawn((
+        HudText,
+        Text::new(""),
+        TextFont {
+            font_size: bevy::text::FontSize::Px(22.0),
+            ..default()
+        },
+        TextColor(Color::srgb(0.96, 0.96, 0.98)),
+        Node {
+            position_type: PositionType::Absolute,
+            right: Val::Px(28.0),
+            bottom: Val::Px(22.0),
+            ..default()
+        },
+    ));
+}
+
+/// Draw the HUD: the crosshair over the aim, and the magazine and reload countdown.
+fn draw_hud(
+    menu: Res<Menu>,
+    weapons: Query<&Weapon>,
+    mut texts: Query<&mut Text, With<HudText>>,
+    mut reticles: Query<&mut Visibility, With<Reticle>>,
+) {
+    let visibility = if menu.open {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
+    for mut reticle in &mut reticles {
+        *reticle = visibility;
+    }
+    let Ok(mut text) = texts.single_mut() else {
+        return;
+    };
+    if menu.open {
+        if !text.0.is_empty() {
+            text.0.clear();
+        }
+        return;
+    }
+    let Ok(weapon) = weapons.single() else {
+        return;
+    };
+    let rendered = if weapon.combat.reload_remaining > 0.0 {
+        format!(
+            "RELOADING  {:.1}s\n{} / {}",
+            weapon.combat.reload_remaining, weapon.combat.ammo, weapon.params.magazine
+        )
+    } else {
+        format!("{} / {}", weapon.combat.ammo, weapon.params.magazine)
+    };
+    if text.0 != rendered {
+        text.0 = rendered;
+    }
+}
+
 /// Gameplay systems only run while the menu is closed.
 fn menu_closed(menu: Res<Menu>) -> bool {
     !menu.open
@@ -415,6 +516,7 @@ fn spawn_model(
         head_skeleton,
         head_attach,
         face,
+        weapon,
         feet_offset,
         animation,
     } = assets;
@@ -444,6 +546,8 @@ fn spawn_model(
             content::Attach::Body => body_parts.push(part),
             content::Attach::Head => head_parts.push(part),
             content::Attach::Face => face_parts.push(part),
+            // The weapon's parts arrive with the weapon, not in the character's `parts`.
+            content::Attach::Weapon => {}
         }
     }
 
@@ -465,9 +569,36 @@ fn spawn_model(
         skeleton.inverse_bindposes.clone(),
     ));
 
-    // A stand-in weapon on the right hand bone, so the character visibly carries a gun. A real
-    // weapon mesh from GAME_DATA is a later slice (its own mesh and materials).
-    if let Some(hand) = skeleton.names.iter().position(|n| n == "Bip001-R-Hand") {
+    // The equipped weapon rides a socket node on the right hand: the node carries the recoil kick,
+    // its sub-meshes hang off it, and a muzzle marker at the barrel's tip feeds the tracers.
+    if let Some(weapon) = weapon {
+        let weapon_handles: Vec<_> = weapon
+            .materials
+            .into_iter()
+            .map(|spec| materials.add(build_material(images, spec)))
+            .collect();
+        if let Some((socket, local)) = weapon.attach {
+            let rig = commands
+                .spawn((
+                    WeaponRig::default(),
+                    local,
+                    Visibility::default(),
+                    ChildOf(bones[socket]),
+                ))
+                .id();
+            commands.entity(rig).with_children(|parent| {
+                for part in weapon.parts {
+                    parent.spawn((
+                        Mesh3d(meshes.add(part.mesh)),
+                        MeshMaterial3d(weapon_handles[part.material].clone()),
+                        Transform::default(),
+                    ));
+                }
+                parent.spawn((Muzzle, Transform::from_translation(weapon.muzzle)));
+            });
+        }
+    } else if let Some(hand) = skeleton.names.iter().position(|n| n == "Bip001-R-Hand") {
+        // No weapon data: a stand-in block so the character still visibly carries something.
         commands.spawn((
             Mesh3d(meshes.add(Cuboid::new(0.06, 0.10, 0.42))),
             MeshMaterial3d(materials.add(StandardMaterial {
@@ -490,7 +621,11 @@ fn spawn_model(
             jump: animation.jump,
             air: animation.air,
             land: animation.land,
+            aim: animation.aim,
             bone_to_track: animation.bone_to_track,
+            upper: player::upper_body_mask(&skeleton),
+            ads: 0.0,
+            aim_time: 0.0,
             bones: bones.clone(),
             skeleton,
             time: 0.0,

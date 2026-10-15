@@ -47,6 +47,8 @@ pub enum Attach {
     /// A sub-mesh of the separate face mesh: a head/neck/chest bust skinned to the body skeleton
     /// and laid out in body model space, alongside the body parts.
     Face,
+    /// A static sub-mesh of the equipped weapon, on its socket on the right hand.
+    Weapon,
 }
 
 /// The PBR maps and scalars for one material slot. `base`/`normal`/`packed` are the decoded
@@ -77,6 +79,8 @@ pub struct CharacterAssets {
     pub head_attach: Option<(usize, Transform)>,
     /// The separate face mesh's skinning, when the character has one.
     pub face: Option<FaceSkin>,
+    /// The equipped weapon's mesh, on its right-hand socket, when one loads.
+    pub weapon: Option<WeaponAssets>,
     /// Vertical (Bevy `+Y`) offset, in metres, that puts the model's lowest point at zero.
     pub feet_offset: f32,
     /// Locomotion clips `[idle, walk, run]` and the bone↔track mapping, when the data resolves.
@@ -91,6 +95,16 @@ pub struct FaceSkin {
     pub inverse_bindposes: Vec<Mat4>,
     /// Face bone → body bone index, by name.
     pub joints: Vec<usize>,
+}
+
+/// One equipped weapon: its static sub-meshes, their materials, and where it hangs.
+pub struct WeaponAssets {
+    pub parts: Vec<Part>,
+    pub materials: Vec<MaterialSpec>,
+    /// The body bone the weapon is socketed to (the right hand), and its local transform.
+    pub attach: Option<(usize, Transform)>,
+    /// The barrel's tip, in the weapon's own frame, where tracers and muzzle flashes start.
+    pub muzzle: Vec3,
 }
 
 /// Locomotion clips and how their tracks map onto the mesh's bones.
@@ -108,6 +122,8 @@ pub struct Animation {
     pub air: usize,
     /// Index of the landing clip.
     pub land: usize,
+    /// Index of the aim-down-sights pose, layered over the upper body while aiming.
+    pub aim: usize,
     /// Per clip, for each mesh bone, the track that drives it (clips animate different track sets).
     pub bone_to_track: Vec<Vec<Option<usize>>>,
 }
@@ -713,6 +729,7 @@ pub fn load_character(
         &mut material_of_slot,
         &mut parts,
     )?;
+    let weapon = load_weapon(data, &skeleton);
     let mut face_skin = None;
     if let Some(face) = &face {
         let dir = face_material_dir
@@ -753,9 +770,109 @@ pub fn load_character(
         head_skeleton: build_skeleton(&head),
         head_attach,
         face: face_skin,
+        weapon,
         feet_offset,
         animation,
     })
+}
+
+/// The ranged weapon this MVP equips. A weapon-selection menu is a later slice.
+pub const WEAPON_MESH_PATH: &str =
+    "/M1/Content/Characters/Weapon/RW/AR/1001/Skel/A001RW_AR_1001_A001.uasset";
+/// The folder holding that weapon's texture maps.
+pub const WEAPON_MATERIAL_DIR: &str = "/M1/Content/Characters/Weapon/RW/AR/1001/Material";
+/// The body bone a weapon sockets onto (falling back to the right hand itself).
+const WEAPON_SOCKET: &str = "RHandWeaponSocket";
+
+/// Load the equipped weapon: its static sub-meshes, their materials, and its socket on the hand.
+/// The weapon mesh is authored in its own frame (`+X` along the barrel), so it rides the hand
+/// socket rather than being skinned to the body. Any failure simply means no weapon.
+fn load_weapon(data: &mut DataSource, skeleton: &Skeleton) -> Option<WeaponAssets> {
+    let mesh = data.mesh(WEAPON_MESH_PATH, "").ok()?;
+    let mut materials = Vec::new();
+    let mut material_of_slot = HashMap::new();
+    let mut parts = Vec::new();
+    let mut cache = HashMap::new();
+    let mut ignored_feet = f32::MAX;
+    build_parts(
+        data,
+        &mesh,
+        Attach::Weapon,
+        WEAPON_MATERIAL_DIR,
+        false,
+        &mut ignored_feet,
+        &mut cache,
+        &mut materials,
+        &mut material_of_slot,
+        &mut parts,
+    )
+    .ok()?;
+    if parts.is_empty() {
+        return None;
+    }
+    let socket = skeleton
+        .names
+        .iter()
+        .position(|n| n == WEAPON_SOCKET)
+        .or_else(|| skeleton.names.iter().position(|n| n.ends_with("R-Hand")))?;
+    // The muzzle is the weapon geometry's furthest point along the barrel (game `+X`).
+    let origin = mesh.bounds_origin;
+    let extent = mesh.bounds_extent;
+    let muzzle = Vec3::new(
+        (origin[0] + extent[0]) * 0.01,
+        origin[2] * 0.01,
+        -origin[1] * 0.01,
+    );
+    Some(WeaponAssets {
+        parts,
+        materials,
+        attach: Some((socket, Transform::default())),
+        muzzle,
+    })
+}
+
+/// A weapon slot's texture variant (`A001`, `B001`, …): its maps are named after the variant rather
+/// than the slot role (`Body`, `Cilp`), so the variant is the keyword to search for.
+fn weapon_variant(slot: &str) -> Option<String> {
+    let s = slot.to_ascii_lowercase();
+    let b = s.as_bytes();
+    (0..b.len().saturating_sub(3))
+        .find(|&i| b[i].is_ascii_alphabetic() && b[i + 1..i + 4].iter().all(u8::is_ascii_digit))
+        .map(|i| s[i..i + 4].to_string())
+}
+
+/// The material for a weapon slot: its maps are named after the slot's variant token.
+fn weapon_material(
+    data: &mut DataSource,
+    material_dir: &str,
+    slot: &str,
+    cache: &mut HashMap<String, Maps>,
+) -> MaterialSpec {
+    if let Some(variant) = weapon_variant(slot) {
+        let key = format!("{material_dir}|{variant}");
+        let maps = cache
+            .entry(key)
+            .or_insert_with(|| load_skin_maps(data, material_dir, &[variant.as_str()]))
+            .clone();
+        if maps.base.is_some() {
+            return MaterialSpec {
+                base: maps.base,
+                packed: maps.packed,
+                normal: maps.normal,
+                tint: [1.0, 1.0, 1.0, 1.0],
+                roughness: 0.45,
+                metallic: 0.8,
+            };
+        }
+    }
+    MaterialSpec {
+        base: None,
+        packed: None,
+        normal: None,
+        tint: [0.10, 0.11, 0.13, 1.0],
+        roughness: 0.35,
+        metallic: 0.8,
+    }
 }
 
 /// The separate face mesh for the character owning `body_path`.
@@ -809,6 +926,8 @@ fn build_parts(
             None => {
                 let spec = if attach == Attach::Face {
                     face_material(data, material_dir, &slot, cache)
+                } else if attach == Attach::Weapon {
+                    weapon_material(data, material_dir, &slot, cache)
                 } else {
                     material_for(data, material_dir, &slot, attach == Attach::Head, cache)
                 };
@@ -846,8 +965,12 @@ fn load_animation(data: &mut DataSource, skeleton: &Skeleton) -> Option<Animatio
     let (jump, jump_map) = load(JUMP_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
     let (air, air_map) = load(AIR_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
     let (land, land_map) = load(LAND_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
-    let clips = vec![idle, walk, run, jump, air, land];
-    let bone_to_track = vec![idle_map, walk_map, run_map, jump_map, air_map, land_map];
+    // The aim-down-sights pose: the equipped AR held to the eye. It is layered over the lower body.
+    let (aim, aim_map) = load(AIM_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
+    let clips = vec![idle, walk, run, jump, air, land, aim];
+    let bone_to_track = vec![
+        idle_map, walk_map, run_map, jump_map, air_map, land_map, aim_map,
+    ];
     info!(
         "animation: {} clips, {} bones driven of {} (skeleton has {} bones)",
         clips.len(),
@@ -863,6 +986,7 @@ fn load_animation(data: &mut DataSource, skeleton: &Skeleton) -> Option<Animatio
         jump: 3,
         air: 4,
         land: 5,
+        aim: 6,
         bone_to_track,
     })
 }
@@ -918,6 +1042,9 @@ pub const AIR_CLIP_PATH: &str =
 /// Touchdown.
 pub const LAND_CLIP_PATH: &str =
     "/M1/Content/Characters/PC/Anim/F/CMN/Sequence/JumpF_0LT_JumpLandHard.uasset";
+/// The aim-down-sights hold for the equipped AR: the weapon-specific "ranged loop".
+pub const AIM_CLIP_PATH: &str =
+    "/M1/Content/Characters/PC/Anim/F/RW/Sequence/AR/1001F_2LT_AR_1001_Ranged_Loop.uasset";
 
 impl DataSource {
     /// The ordered reference-skeleton bone names of the character skeleton (~4930 bones). An
@@ -1158,10 +1285,14 @@ mod tests {
             return;
         };
         let a = assets.animation.as_ref().expect("the clips load");
-        assert_eq!(a.clips.len(), 6);
+        assert_eq!(a.clips.len(), 7, "six locomotion clips plus the aim pose");
         assert_eq!(a.clips[a.jump].num_samples, 31, "JumpStart");
         assert_eq!(a.clips[a.air].num_samples, 61, "JumpLoop");
         assert_eq!(a.clips[a.land].num_samples, 44, "JumpLandHard");
+        assert!(
+            a.clips[a.aim].num_samples > 1,
+            "the weapon-specific ranged loop is the aim pose, not a one-frame stand-in"
+        );
     }
 
     /// The face is a head/neck/chest bust skinned to the body skeleton, so its neck follows the
@@ -1259,6 +1390,17 @@ mod tests {
             catalog.iter().any(|c| c.skins.len() > 1),
             "a character with several skins is expected"
         );
+    }
+
+    /// A weapon slot names its texture maps by variant (`A001`, `B001`), not by role.
+    #[test]
+    fn weapon_variants_come_from_the_slot_token() {
+        assert_eq!(
+            weapon_variant("RW_AR_1001_A001_Body").as_deref(),
+            Some("a001")
+        );
+        assert_eq!(weapon_variant("RW_AR_1001_B001").as_deref(), Some("b001"));
+        assert_eq!(weapon_variant("nothing_here"), None);
     }
 
     /// A pure conversion check that does not need data: game `(x, y, z)` cm maps to Bevy

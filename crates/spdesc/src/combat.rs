@@ -20,6 +20,8 @@ pub struct Enemy {
 #[derive(Component)]
 pub struct Tracer {
     pub ttl: f32,
+    /// Its starting time to live, so the emissive can fade proportionally.
+    pub life: f32,
 }
 
 /// The player's weapon: the tuning and the simulation state.
@@ -35,12 +37,51 @@ pub struct Impact {
     pub ttl: f32,
 }
 
-/// Advance the weapon timers by the frame delta.
-pub fn tick_weapon(time: Res<Time>, mut weapons: Query<&mut Weapon>) {
+/// A short-lived muzzle flash at the barrel's tip.
+#[derive(Component)]
+pub struct Flash {
+    pub ttl: f32,
+}
+
+/// How far (metres) a shot that hits nothing still draws its tracer, so a miss is a short line
+/// rather than a beam across the map.
+const MISS_TRACER_LENGTH: f32 = 45.0;
+/// Seconds a tracer, a muzzle flash and an impact live.
+const TRACER_TTL: f32 = 0.10;
+const FLASH_TTL: f32 = 0.05;
+const IMPACT_TTL: f32 = 0.12;
+/// Recoil travel per shot (metres, back along the barrel) and how fast it eases back, per second.
+const RECOIL_KICK: f32 = 0.05;
+const RECOIL_DECAY: f32 = 10.0;
+
+/// The weapon model's socket node on the right hand; it carries the recoil kick.
+#[derive(Component, Default)]
+pub struct WeaponRig {
+    /// Recoil displacement from rest, metres, in the socket's local frame (back along `-X`).
+    pub kick: Vec3,
+}
+
+/// The barrel's tip, where a shot's tracer and muzzle flash start.
+#[derive(Component)]
+pub struct Muzzle;
+
+/// Advance the weapon timers by the frame delta, and ease the weapon's recoil back to rest.
+pub fn tick_weapon(
+    time: Res<Time>,
+    mut weapons: Query<&mut Weapon>,
+    mut rigs: Query<(&mut WeaponRig, &mut Transform)>,
+) {
     let dt = (time.delta_secs() as f64).clamp(0.0, 0.05);
     for mut weapon in &mut weapons {
         let params = weapon.params;
         weapon.combat.tick(&params, dt);
+    }
+    for (mut rig, mut transform) in &mut rigs {
+        rig.kick *= (1.0 - RECOIL_DECAY * dt as f32).clamp(0.0, 1.0);
+        if rig.kick.length_squared() < 1e-7 {
+            rig.kick = Vec3::ZERO;
+        }
+        transform.translation = rig.kick;
     }
 }
 
@@ -52,6 +93,8 @@ pub fn fire_weapon(
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&CursorOptions, With<PrimaryWindow>>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
+    muzzles: Query<&GlobalTransform, With<Muzzle>>,
+    mut rigs: Query<&mut WeaponRig>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut weapons: Query<&mut Weapon>,
@@ -66,6 +109,8 @@ pub fn fire_weapon(
     };
     let origin_bevy = camera.translation();
     let forward_bevy = camera.forward();
+    // Shots present from the barrel's tip, not from the eye, so the tracer reads as the gun firing.
+    let muzzle = muzzles.single().map(GlobalTransform::translation).ok();
 
     for mut weapon in &mut weapons {
         if keys.just_pressed(KeyCode::KeyR) {
@@ -99,19 +144,21 @@ pub fn fire_weapon(
                     enemy.target.health -= damage;
                     enemy.target.health = enemy.target.health.max(0.0);
                 }
-                let hit = to_bevy(point);
                 let _ = killed;
-                spawn_tracer(&mut commands, &mut meshes, &mut materials, origin_bevy, hit);
+                let start = muzzle.unwrap_or(origin_bevy);
+                let hit = to_bevy(point);
+                spawn_tracer(&mut commands, &mut meshes, &mut materials, start, hit);
                 spawn_impact(&mut commands, &mut meshes, &mut materials, hit);
+                spawn_flash(&mut commands, &mut meshes, &mut materials, start);
+                kick(&mut rigs);
             }
-            Ok(Shot::Miss { point }) => {
-                spawn_tracer(
-                    &mut commands,
-                    &mut meshes,
-                    &mut materials,
-                    origin_bevy,
-                    to_bevy(point),
-                );
+            Ok(Shot::Miss { .. }) => {
+                // The ray left the muzzle's neighbourhood; draw the miss tracer from the muzzle.
+                let start = muzzle.unwrap_or(origin_bevy);
+                let end = start + forward_bevy * MISS_TRACER_LENGTH;
+                spawn_tracer(&mut commands, &mut meshes, &mut materials, start, end);
+                spawn_flash(&mut commands, &mut meshes, &mut materials, start);
+                kick(&mut rigs);
             }
             Err(FireError::Empty) => {
                 let params = weapon.params;
@@ -122,20 +169,33 @@ pub fn fire_weapon(
     }
 }
 
-/// Fade and despawn tracers and impacts.
+/// Fade and despawn tracers, flashes and impacts. Each owns its material, so it fades on its own.
 pub fn age_effects(
     mut commands: Commands,
     time: Res<Time>,
-    mut tracers: Query<(Entity, &mut Tracer, &mut Transform)>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut tracers: Query<(Entity, &mut Tracer, &MeshMaterial3d<StandardMaterial>)>,
+    mut flashes: Query<(Entity, &mut Flash, &MeshMaterial3d<StandardMaterial>)>,
     mut impacts: Query<(Entity, &mut Impact)>,
 ) {
     let dt = time.delta_secs();
-    for (entity, mut tracer, mut tf) in &mut tracers {
+    for (entity, mut tracer, material) in &mut tracers {
         tracer.ttl -= dt;
-        // Shrink the tracer towards its origin as it fades.
-        tf.scale.y *= 0.6;
-        tf.scale.z *= 0.6;
+        let fade = (tracer.ttl / tracer.life).clamp(0.0, 1.0);
+        if let Some(mut material) = materials.get_mut(&material.0) {
+            material.emissive = LinearRgba::new(4.0 * fade, 3.4 * fade, 1.2 * fade, 1.0);
+        }
         if tracer.ttl <= 0.0 {
+            commands.entity(entity).despawn();
+        }
+    }
+    for (entity, mut flash, material) in &mut flashes {
+        flash.ttl -= dt;
+        let fade = (flash.ttl / FLASH_TTL).clamp(0.0, 1.0);
+        if let Some(mut material) = materials.get_mut(&material.0) {
+            material.emissive = LinearRgba::new(9.0 * fade, 6.0 * fade, 2.0 * fade, 1.0);
+        }
+        if flash.ttl <= 0.0 {
             commands.entity(entity).despawn();
         }
     }
@@ -144,6 +204,13 @@ pub fn age_effects(
         if impact.ttl <= 0.0 {
             commands.entity(entity).despawn();
         }
+    }
+}
+
+/// Kick the weapon back along its barrel (`-X`) for one shot.
+fn kick(rigs: &mut Query<&mut WeaponRig>) {
+    for mut rig in rigs {
+        rig.kick.x -= RECOIL_KICK;
     }
 }
 
@@ -193,7 +260,34 @@ fn spawn_tracer(
         Mesh3d(mesh),
         MeshMaterial3d(material),
         Transform::from_translation(mid).with_rotation(rotation),
-        Tracer { ttl: 0.06 },
+        Tracer {
+            ttl: TRACER_TTL,
+            life: TRACER_TTL,
+        },
+    ));
+}
+
+/// A bright unlit flash at the muzzle, angled arbitrarily so it does not read as a flat card.
+fn spawn_flash(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    at: Vec3,
+) {
+    let mesh = meshes.add(Cuboid::new(0.16, 0.16, 0.16));
+    let material = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.85, 0.5),
+        emissive: LinearRgba::new(9.0, 6.0, 2.0, 1.0),
+        unlit: true,
+        ..default()
+    });
+    commands.spawn((
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        Transform::from_translation(at)
+            .with_rotation(Quat::from_rotation_x(0.6))
+            .with_scale(Vec3::new(1.0, 1.0, 0.4)),
+        Flash { ttl: FLASH_TTL },
     ));
 }
 
@@ -214,7 +308,7 @@ fn spawn_impact(
         Mesh3d(mesh),
         MeshMaterial3d(material),
         Transform::from_translation(at),
-        Impact { ttl: 0.12 },
+        Impact { ttl: IMPACT_TTL },
     ));
 }
 
