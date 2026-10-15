@@ -22,6 +22,8 @@ const DOWNED_COLOUR: Color = Color::srgb(0.16, 0.14, 0.15);
 /// The board's radius and the post's height, metres.
 const BOARD_RADIUS: f32 = 0.45;
 const POST_HEIGHT: f32 = 0.62;
+/// How far a downed target sinks, so it leaves the field until it returns.
+const SINK_DEPTH: f32 = 1.5;
 
 /// A shootable target: its simulation state, how to present it, and its respawn.
 #[derive(Component)]
@@ -32,6 +34,10 @@ pub struct Enemy {
     pub full_health: f64,
     /// Seconds until it pops back up; `0` while it is standing.
     pub respawn: f32,
+    /// The board's material, so this target alone can be dimmed. It is on the board *child* (the
+    /// anchor entity carries the transform the fall is written to), so the handle is kept here
+    /// rather than reached through a query.
+    pub board: Handle<StandardMaterial>,
 }
 
 /// A fading tracer line between two Bevy-space points.
@@ -298,30 +304,26 @@ pub fn update_targets(
     time: Res<Time>,
     sounds: Res<Sounds>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut enemies: Query<(
-        &mut Enemy,
-        &MeshMaterial3d<StandardMaterial>,
-        &mut Transform,
-    )>,
+    mut enemies: Query<(&mut Enemy, &mut Transform)>,
 ) {
     let dt = time.delta_secs();
-    for (mut enemy, material, mut tf) in &mut enemies {
+    for (mut enemy, mut tf) in &mut enemies {
         match advance_respawn(enemy.target.health, &mut enemy.respawn, dt) {
             Respawn::Waiting => {}
             Respawn::Downed => {
                 audio::play(&mut commands, &sounds.kill, 0.7);
                 tf.rotation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
-                tf.translation = enemy.home + Vec3::Y * (POST_HEIGHT + BOARD_RADIUS) * 0.3;
-                if let Some(mut material) = materials.get_mut(&material.0) {
-                    material.base_color = DOWNED_COLOUR;
+                tf.translation = enemy.home - Vec3::Y * SINK_DEPTH;
+                if let Some(mut board) = materials.get_mut(&enemy.board) {
+                    board.base_color = DOWNED_COLOUR;
                 }
             }
             Respawn::Revived => {
                 enemy.target.health = enemy.full_health;
                 tf.translation = enemy.home;
                 tf.rotation = Quat::IDENTITY;
-                if let Some(mut material) = materials.get_mut(&material.0) {
-                    material.base_color = TARGET_COLOUR;
+                if let Some(mut board) = materials.get_mut(&enemy.board) {
+                    board.base_color = TARGET_COLOUR;
                 }
             }
         }
@@ -447,6 +449,7 @@ pub fn spawn_enemies(
                     home,
                     full_health: 600.0,
                     respawn: 0.0,
+                    board: material.clone(),
                 },
             ))
             .with_children(|parent| {
@@ -529,6 +532,8 @@ fn dir_to_game(v: Vec3) -> [f64; 3] {
 
 #[cfg(test)]
 mod tests {
+    use core::time::Duration;
+
     use super::*;
 
     /// A killed target goes down exactly once, stays down for the full delay, then stands back up
@@ -583,6 +588,79 @@ mod tests {
             "down for {elapsed}s, expected about {RESPAWN_SECONDS}s"
         );
         assert_eq!(respawn, 0.0, "the timer resets once it is back up");
+    }
+
+    /// A killed target leaves the field and comes back. This drives the real system over an entity
+    /// shaped like a spawned one — the anchor carries the transform the fall is written to, and the
+    /// board (with its material) hangs below it — so a query that reached for the board's own
+    /// components would match nothing and silently do nothing.
+    #[test]
+    fn a_killed_target_leaves_the_field_and_returns() {
+        let mut app = App::new();
+        app.add_plugins((TaskPoolPlugin::default(), AssetPlugin::default()));
+        app.init_resource::<Time>();
+        app.init_asset::<StandardMaterial>();
+        app.init_asset::<AudioSource>();
+        // The kill cue's handles are irrelevant here; only the board's material is reached.
+        app.insert_resource(Sounds {
+            shot: default(),
+            dry: default(),
+            hit: default(),
+            kill: default(),
+            reload_start: default(),
+            reload_end: default(),
+            footstep: default(),
+            jump: default(),
+            land: default(),
+        });
+        app.add_systems(Update, update_targets);
+
+        let home = Vec3::new(15.0, 1.0, 0.0);
+        let board = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let target = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(home),
+                Enemy {
+                    target: Target::new([1500.0, 0.0, 100.0], 70.0, 0.0),
+                    home,
+                    full_health: 600.0,
+                    respawn: 0.0,
+                    board,
+                },
+            ))
+            .id();
+
+        app.update();
+        let sunk = app
+            .world()
+            .entity(target)
+            .get::<Transform>()
+            .unwrap()
+            .translation;
+        assert!(
+            sunk.y < home.y - 1.0,
+            "a downed target sinks out of the field, got {sunk:?}"
+        );
+
+        for _ in 0..(RESPAWN_SECONDS / 0.1) as i32 + 2 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(Duration::from_millis(100));
+            app.update();
+        }
+        let enemy = app.world().entity(target).get::<Enemy>().unwrap();
+        assert_eq!(enemy.target.health, 600.0, "it stands back up armed");
+        let stood = app
+            .world()
+            .entity(target)
+            .get::<Transform>()
+            .unwrap()
+            .translation;
+        assert_eq!(stood, home, "and back where it stood");
     }
 
     #[test]
