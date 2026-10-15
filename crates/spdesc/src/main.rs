@@ -5,6 +5,7 @@
 //! `spdesc_game_core::game_data`, builds the Ultimate Bunny's meshes and textures from the
 //! player's install at startup, and presents a movable character on a flat ground plane.
 
+mod audio;
 mod catalog;
 mod combat;
 mod content;
@@ -20,9 +21,9 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 
+use audio::setup_sounds;
 use combat::{
-    Muzzle, Weapon, WeaponRig, age_effects, fire_weapon, retire_dead_enemies, spawn_enemies,
-    tick_weapon,
+    Muzzle, Weapon, WeaponRig, age_effects, fire_weapon, spawn_enemies, tick_weapon, update_targets,
 };
 use content::{CharacterAssets, DataSource, MaterialSpec};
 use hair::{Hair, animate_hair};
@@ -51,7 +52,13 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.46, 0.55, 0.68)))
         .add_systems(
             Startup,
-            (setup_scene, grab_cursor, setup_hud, setup_character),
+            (
+                setup_scene,
+                grab_cursor,
+                setup_hud,
+                setup_sounds,
+                setup_character,
+            ),
         )
         .add_systems(
             Update,
@@ -69,7 +76,7 @@ fn main() {
                     tick_weapon,
                     fire_weapon,
                     age_effects,
-                    retire_dead_enemies,
+                    update_targets,
                 )
                     .run_if(menu_closed)
                     .chain(),
@@ -89,11 +96,7 @@ fn setup_scene(
 ) {
     commands.spawn((
         Camera3d::default(),
-        CameraRig {
-            yaw: 160.0,
-            pitch: -6.0,
-            ads: 0.0,
-        },
+        CameraRig::default(),
         Transform::from_xyz(0.0, 2.5, -5.0).looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
     ));
 
@@ -134,7 +137,7 @@ fn setup_scene(
         ));
     }
 
-    spawn_enemies(&mut commands, &mut meshes, &mut materials);
+    spawn_enemies(&mut commands, &mut meshes, &mut materials, &mut images);
 }
 
 /// A two-tone checker image with `cell`-pixel squares.
@@ -645,7 +648,11 @@ fn spawn_model(
                         Transform::default(),
                     ));
                 }
-                parent.spawn((Muzzle, Transform::from_translation(weapon.muzzle)));
+                parent.spawn((
+                    Muzzle,
+                    Transform::from_translation(weapon.muzzle),
+                    Visibility::default(),
+                ));
             });
         }
     } else if let Some(hand) = skeleton.names.iter().position(|n| n == "Bip001-R-Hand") {
@@ -680,6 +687,7 @@ fn spawn_model(
                 .position(|name| name == content::WEAPON_SOCKET),
             ads: 0.0,
             aim_time: 0.0,
+            step_timer: 0.0,
             bones: bones.clone(),
             skeleton,
             time: 0.0,

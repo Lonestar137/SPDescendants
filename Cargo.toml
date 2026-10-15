@@ -28,6 +28,10 @@ bevy = { version = "0.20.0", default-features = false, features = [
     "ui_bevy_render",
     "scene",
     "picking",
+    # The sound effects are generated at runtime as WAV, so the audio stack and the WAV codec are
+    # all that is needed; no compressed formats ship.
+    "bevy_audio",
+    "wav",
 ] }
 
 # Dependencies at opt-level 3 in dev: at opt-level 0, math- and physics-heavy dependency code

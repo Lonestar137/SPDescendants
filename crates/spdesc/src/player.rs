@@ -14,6 +14,7 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use spdesc_data::anim::AnimClip;
 use spdesc_game_core::movement::{Character, MoveIntent, MovementParams};
 
+use crate::audio::{self, Sounds};
 use crate::combat::Weapon;
 use crate::content::{Locomotion, Reload, Skeleton};
 
@@ -68,6 +69,8 @@ pub struct Animator {
     /// The eased weight of the aim layer, and its looping time through the aim clip.
     pub ads: f32,
     pub aim_time: f32,
+    /// Seconds until the next footfall.
+    pub step_timer: f32,
     pub bones: Vec<Entity>,
     pub skeleton: Skeleton,
     /// Looping locomotion time, seconds.
@@ -191,7 +194,9 @@ fn phase(grounded: bool, air_timer: f32, land_timer: f32, jump_duration: f32) ->
 /// takeoff clip once, then the airborne loop. On touchdown: the landing clip once, then back to
 /// locomotion. Nothing plays a landing pose until the character is actually on the ground.
 pub fn animate_locomotion(
+    mut commands: Commands,
     time: Res<Time>,
+    sounds: Res<Sounds>,
     rigs: Query<&CameraRig>,
     mut players: Query<(&Player, &mut Animator, Option<&Weapon>)>,
     mut transforms: Query<&mut Transform>,
@@ -212,12 +217,27 @@ pub fn animate_locomotion(
         if grounded {
             if !animator.was_grounded {
                 animator.land_timer = land_duration;
+                audio::play(&mut commands, &sounds.land, 0.6);
             }
             animator.air_timer = 0.0;
         } else {
+            if animator.was_grounded {
+                audio::play(&mut commands, &sounds.jump, 0.5);
+            }
             animator.air_timer += dt;
         }
         animator.was_grounded = grounded;
+
+        // Footfalls: quicker the faster it goes, and immediate when it first moves off.
+        if grounded && speed > 20.0 {
+            animator.step_timer -= dt;
+            if animator.step_timer <= 0.0 {
+                animator.step_timer = (180.0 / speed).clamp(0.22, 0.5) as f32;
+                audio::play(&mut commands, &sounds.footstep, 0.35);
+            }
+        } else {
+            animator.step_timer = 0.0;
+        }
 
         // Choose the clip and how far into it (seconds) we are.
         let (index, at, looping) = match phase(
