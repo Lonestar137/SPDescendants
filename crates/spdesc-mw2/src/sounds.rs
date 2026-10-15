@@ -126,18 +126,93 @@ impl LoadedSound {
 /// The format code the game uses for uncompressed PCM.
 pub const PCM: i32 = 1;
 
+/// One of the game's string tables: what a `.csv` in the install holds.
+#[derive(Clone, Debug, Default)]
+pub struct Table {
+    /// The table's name, e.g. `mp/rankIconTable.csv`.
+    pub name: String,
+    pub columns: usize,
+    pub rows: usize,
+    /// The cells, row by row, `columns` each.
+    pub cells: Vec<String>,
+}
+
+impl Table {
+    /// One cell, or `None` when it is outside the table.
+    pub fn cell(&self, row: usize, column: usize) -> Option<&str> {
+        if row >= self.rows || column >= self.columns {
+            return None;
+        }
+        self.cells
+            .get(row * self.columns + column)
+            .map(String::as_str)
+    }
+
+    /// The column a header names, so a table can be read by name rather than by index.
+    pub fn column(&self, header: &str) -> Option<usize> {
+        (0..self.columns).find(|c| {
+            self.cell(0, *c)
+                .is_some_and(|cell| cell.eq_ignore_ascii_case(header))
+        })
+    }
+}
+
+/// A raw file inside a zone: a `.csv`, `.gsc` or other data blob the game ships.
+#[derive(Clone)]
+pub struct RawFile {
+    pub name: String,
+    /// The bytes as the zone stores them.
+    pub bytes: Vec<u8>,
+    /// Whether those bytes are a zlib stream rather than the file itself.
+    pub zlib_compressed: bool,
+}
+
+impl RawFile {
+    /// The file's bytes, inflating them when the zone stored them compressed.
+    pub fn data(&self) -> Result<Vec<u8>, Error> {
+        if !self.zlib_compressed {
+            return Ok(self.bytes.clone());
+        }
+        crate::open::inflate_zlib(&self.bytes)
+    }
+}
+
+impl std::fmt::Debug for RawFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawFile")
+            .field("name", &self.name)
+            .field("bytes", &self.bytes.len())
+            .field("zlib", &self.zlib_compressed)
+            .finish()
+    }
+}
+
 /// Everything a zone's walk captured.
 #[derive(Default)]
-pub struct SoundSet {
+pub struct ZoneData {
     pub aliases: Vec<SoundAlias>,
     pub loaded: Vec<LoadedSound>,
+    /// The game's string tables, by name.
+    pub tables: Vec<Table>,
+    /// The game's raw files, by name.
+    pub raw_files: Vec<RawFile>,
     /// How many asset bodies the walk loaded before it stopped or finished.
     pub walked: usize,
     /// The asset the walk stopped on and why, when it could not finish the zone.
     pub stopped_at: Option<String>,
 }
 
-impl SoundSet {
+impl ZoneData {
+    /// A string table by name.
+    pub fn table(&self, name: &str) -> Option<&Table> {
+        self.tables.iter().find(|t| t.name == name)
+    }
+
+    /// A raw file by name.
+    pub fn raw_file(&self, name: &str) -> Option<&RawFile> {
+        self.raw_files.iter().find(|f| f.name == name)
+    }
+
     /// Every alias whose name matches `predicate`.
     pub fn aliases_matching<'s>(
         &'s self,
@@ -163,11 +238,13 @@ impl SoundSet {
     }
 }
 
-impl std::fmt::Debug for SoundSet {
+impl std::fmt::Debug for ZoneData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SoundSet")
+        f.debug_struct("ZoneData")
             .field("aliases", &self.aliases.len())
             .field("loaded", &self.loaded.len())
+            .field("tables", &self.tables.len())
+            .field("raw_files", &self.raw_files.len())
             .field("walked", &self.walked)
             .field("stopped_at", &self.stopped_at)
             .finish()
@@ -175,7 +252,7 @@ impl std::fmt::Debug for SoundSet {
 }
 
 /// Walk `image` and capture its sounds.
-pub fn read_sounds(image: &ZoneImage) -> std::result::Result<SoundSet, Error> {
+pub fn read_zone(image: &ZoneImage) -> std::result::Result<ZoneData, Error> {
     let mut memory = image.memory();
     let mut stream = memory.stream(image.bytes())?;
     let mut sink = Sink::default();
@@ -196,9 +273,11 @@ pub fn read_sounds(image: &ZoneImage) -> std::result::Result<SoundSet, Error> {
     }
     stream.pop()?;
 
-    Ok(SoundSet {
+    Ok(ZoneData {
         aliases: sink.aliases,
         loaded: sink.loaded,
+        tables: sink.tables,
+        raw_files: sink.raw_files,
         walked: sink.walked,
         stopped_at: sink.stopped_at,
     })
@@ -213,6 +292,8 @@ fn type_name(ty: AssetType) -> &'static str {
 struct Sink {
     aliases: Vec<SoundAlias>,
     loaded: Vec<LoadedSound>,
+    tables: Vec<Table>,
+    raw_files: Vec<RawFile>,
     /// The payload each sound file resolves to, keyed by where the file struct sits.
     file_to_payload: HashMap<(u8, u32), String>,
     /// The streamed file each sound file resolves to, keyed the same way.
@@ -298,6 +379,49 @@ impl AssetLinkSink for Sink {
     ) -> fastfile_iw4::Result<()> {
         self.file_to_streamed
             .insert(file_key(file), (dir.to_owned(), name.to_owned()));
+        Ok(())
+    }
+
+    fn capture_string_table(
+        &mut self,
+        s: &ZoneStream<'_>,
+        header: Ptr,
+    ) -> fastfile_iw4::Result<()> {
+        let name = name_at(s, header, 0).unwrap_or_default();
+        let columns = s.i32_at(header, s.layout(4, 8)).unwrap_or(0).max(0) as usize;
+        let rows = s.i32_at(header, s.layout(8, 12)).unwrap_or(0).max(0) as usize;
+        let mut cells = Vec::with_capacity(columns.saturating_mul(rows));
+        if let Ok(ZonePtr::Offset(target)) = s.ptr_at(header, s.layout(12, 16)) {
+            let array = s.resolve_alias(target);
+            for i in 0..columns.saturating_mul(rows) {
+                let cell = array.at(i * s.layout(sz::STRING_TABLE_CELL, 16));
+                cells.push(name_at(s, cell, 0).unwrap_or_default());
+            }
+        }
+        if !name.is_empty() {
+            self.tables.push(Table {
+                name,
+                columns,
+                rows,
+                cells,
+            });
+        }
+        Ok(())
+    }
+
+    fn capture_raw_file(
+        &mut self,
+        name: &str,
+        data: &[u8],
+        zlib_compressed: bool,
+    ) -> fastfile_iw4::Result<()> {
+        if !name.is_empty() && !data.is_empty() {
+            self.raw_files.push(RawFile {
+                name: name.to_owned(),
+                bytes: data.to_vec(),
+                zlib_compressed,
+            });
+        }
         Ok(())
     }
 

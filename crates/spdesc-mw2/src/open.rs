@@ -39,6 +39,8 @@ pub enum Error {
     },
     /// The zone could not be walked.
     Zone(fastfile_iw4::ZoneError),
+    /// An `.iwd` archive entry could not be read.
+    Archive(String),
 }
 
 impl std::fmt::Display for Error {
@@ -54,6 +56,7 @@ impl std::fmt::Display for Error {
                 "the asset table validates as neither wire layout (x86: {x86:?}; x64: {x64:?})"
             ),
             Self::Zone(e) => write!(f, "{e:?}"),
+            Self::Archive(e) => write!(f, "reading an .iwd entry: {e}"),
         }
     }
 }
@@ -205,6 +208,11 @@ fn dechunk_authed(body: &[u8]) -> Result<Vec<u8>, Error> {
         chunk_in_group = (chunk_in_group + 1) % (AUTHED_CHUNKS_PER_GROUP + 1);
     }
     Ok(out)
+}
+
+/// Inflate one zlib stream, for a raw file the zone stored compressed.
+pub(crate) fn inflate_zlib(bytes: &[u8]) -> Result<Vec<u8>, Error> {
+    inflate(bytes)
 }
 
 /// Inflate one zlib stream, chunk by chunk so a 200 MB zone does not need a guessed capacity.

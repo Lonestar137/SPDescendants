@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use spdesc_mw2::{EFFECT_ZONES, SoundBank};
+use spdesc_mw2::{SoundBank, ZONES};
 
 fn main() -> std::process::ExitCode {
     let mut args = std::env::args().skip(1);
@@ -19,6 +19,9 @@ fn main() -> std::process::ExitCode {
     let mut zones: Vec<String> = Vec::new();
     let mut patterns: Vec<String> = Vec::new();
     let mut dump: Option<PathBuf> = None;
+    let mut tables = false;
+    let mut show: Vec<String> = Vec::new();
+    let mut images: Option<PathBuf> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--match" => {
@@ -28,6 +31,13 @@ fn main() -> std::process::ExitCode {
             }
             "--zones" => zones.extend(args.by_ref()),
             "--dump" => dump = args.next().map(PathBuf::from),
+            "--tables" => tables = true,
+            "--images" => images = args.next().map(PathBuf::from),
+            "--show" => {
+                if let Some(name) = args.next() {
+                    show.push(name);
+                }
+            }
             "--help" | "-h" => {
                 println!("usage: sounds [install] [zone...] [--match text]... [--dump dir]");
                 return std::process::ExitCode::SUCCESS;
@@ -46,7 +56,7 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     };
     let zone_list: Vec<&str> = if zones.is_empty() {
-        EFFECT_ZONES.to_vec()
+        ZONES.to_vec()
     } else {
         zones.iter().map(String::as_str).collect()
     };
@@ -69,6 +79,48 @@ fn main() -> std::process::ExitCode {
         );
     }
     println!("total aliases: {}", bank.alias_count());
+    if let Some(dir) = &images
+        && let Err(error) = dump_icons(&install, dir)
+    {
+        eprintln!("cannot write the icons: {error}");
+        return std::process::ExitCode::FAILURE;
+    }
+    for wanted in &show {
+        for (zone, data) in bank.zones() {
+            if let Some(table) = data.table(wanted) {
+                println!(
+                    "\n{zone}: {} ({}x{})",
+                    table.name, table.columns, table.rows
+                );
+                for row in 0..table.rows {
+                    let cells: Vec<&str> = (0..table.columns)
+                        .map(|c| table.cell(row, c).unwrap_or(""))
+                        .collect();
+                    println!("  {row:>3}: {}", cells.join(" | "));
+                }
+            }
+        }
+    }
+    if tables {
+        for (zone, data) in bank.zones() {
+            println!(
+                "\n{zone}: {} string table(s), {} raw file(s)",
+                data.tables.len(),
+                data.raw_files.len()
+            );
+            for table in &data.tables {
+                println!("  table {} ({}x{})", table.name, table.columns, table.rows);
+            }
+            for file in &data.raw_files {
+                println!(
+                    "  raw   {} ({} bytes{})",
+                    file.name,
+                    file.bytes.len(),
+                    if file.zlib_compressed { ", zlib" } else { "" }
+                );
+            }
+        }
+    }
     if let Some(dir) = &dump
         && let Err(error) = std::fs::create_dir_all(dir)
     {
@@ -123,4 +175,60 @@ fn main() -> std::process::ExitCode {
         println!("\nwrote the payloads to {}", dir.display());
     }
     std::process::ExitCode::SUCCESS
+}
+
+/// Write the rank and prestige icons out as PPM, for looking at the decoded art.
+fn dump_icons(install: &std::path::Path, dir: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let bank = SoundBank::read(install, &["code_post_gfx_mp"]);
+    let zone = bank
+        .zones()
+        .first()
+        .map(|(_, data)| data)
+        .ok_or("code_post_gfx_mp did not open")?;
+    let table = zone
+        .table("mp/rankicontable.csv")
+        .ok_or("no mp/rankicontable.csv")?;
+
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for rank in 0..70usize {
+        if let Some(name) = table.cell(rank + 2, 1) {
+            let file = format!("rank-{rank:02}-{name}");
+            entries.push((spdesc_mw2::iwd::rank_icon_entry(name), file));
+        }
+    }
+    for prestige in 1..=10u32 {
+        entries.push((
+            spdesc_mw2::iwd::prestige_icon_entry(prestige),
+            format!("prestige-{prestige:02}"),
+        ));
+    }
+
+    let mut written = 0;
+    for (entry, name) in entries {
+        let Some(bytes) = spdesc_mw2::iwd::read_entry(install, &entry) else {
+            eprintln!("missing {entry}");
+            continue;
+        };
+        let image = match spdesc_mw2::iwi::decode(&bytes) {
+            Ok(image) => image,
+            Err(error) => {
+                eprintln!("{entry}: {error}");
+                continue;
+            }
+        };
+        let mut ppm = format!("P6\n{} {}\n255\n", image.width, image.height).into_bytes();
+        for texel in image.rgba.as_chunks::<4>().0 {
+            // Composite over mid grey so an alpha shape is visible in a PPM.
+            let a = u32::from(texel[3]);
+            for channel in &texel[0..3] {
+                ppm.push(((u32::from(*channel) * a + 110 * (255 - a)) / 255) as u8);
+            }
+        }
+        let file = dir.join(format!("{name}.ppm"));
+        std::fs::write(&file, ppm).map_err(|e| e.to_string())?;
+        written += 1;
+    }
+    println!("wrote {written} icon(s) to {}", dir.display());
+    Ok(())
 }
