@@ -52,8 +52,9 @@ Captured by walking `<MW2_DATA>/zone/english/common.ff` and `code_post_gfx.ff`:
 | `common.ff` | 9288 | 7570 | 959 |
 | `code_post_gfx.ff` | 1972 | 18 | 10 |
 
-The app reads both at startup — 7588 aliases, the startup log measuring ≈0.7 s on a warm page cache
-— and takes each cue from the alias of the same name (`crates/spdesc/src/audio.rs`). Durations
+The app reads `common`, `code_post_gfx` and (for the multiplayer tables)
+`code_post_gfx_mp` at startup — 7588 aliases and 86 tables, the startup log measuring ≈0.7 s on a
+warm page cache — and takes each cue from the alias of the same name (`crates/spdesc/src/audio.rs`). Durations
 below are the payload length divided by its own rate and channels, not the alias metadata:
 
 | Cue | Alias | Payload |
@@ -67,6 +68,8 @@ below are the payload length divided by its own rate and channels, not the alias
 | footstep | `step_run_default` (walk/sprint differ only in name) | mono 44.1 kHz, 0.472 s |
 | takeoff | `gear_rattle_plr_mantle` | mono 44.1 kHz, 0.753 s |
 | touchdown | `Land_plr_default` | mono 44.1 kHz, 0.444 s |
+| reaching a rank | `sp_level_up` | *streamed*: `Sound/mp/mp_levelup_final.wav` |
+| prestiging | `enter_prestige` | mono 44.1 kHz, 3.98 s |
 
 The M4A1 is the weapon family used throughout (`weap_m4carbine_*`), because the app models an
 assault rifle. A data-gated test in `crates/spdesc/src/audio.rs` walks the installed zone and fails

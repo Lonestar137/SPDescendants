@@ -54,6 +54,10 @@ const FOOTSTEP: &[&str] = &["step_run_default", "step_walk_default"];
 const JUMP: &[&str] = &["gear_rattle_plr_mantle"];
 /// Touchdown.
 const LAND: &[&str] = &["Land_plr_default"];
+/// Reaching a rank: the promotion fanfare, which is a streamed file in the archives.
+const PROMOTION: &[&str] = &["sp_level_up"];
+/// Prestiging: the game's prestige fanfare.
+const PRESTIGE: &[&str] = &["enter_prestige"];
 
 /// Every sound the game plays, built once at startup.
 #[derive(Resource)]
@@ -76,6 +80,10 @@ pub struct Sounds {
     pub jump: Handle<AudioSource>,
     /// Touchdown.
     pub land: Handle<AudioSource>,
+    /// Reaching a rank.
+    pub promotion: Handle<AudioSource>,
+    /// Prestiging.
+    pub prestige: Handle<AudioSource>,
 }
 
 impl Sounds {
@@ -85,9 +93,8 @@ impl Sounds {
         let mut from_mw2 = 0usize;
         let mut synthesised = 0usize;
         let mut take = |aliases: &[&str], synth: fn() -> Vec<f32>| -> Handle<AudioSource> {
-            let from_sound_data = mw2
-                .and_then(|bank| aliases.iter().find_map(|name| bank.payload(name)))
-                .and_then(|payload| payload.to_wav());
+            let from_sound_data =
+                mw2.and_then(|bank| aliases.iter().find_map(|name| bank.audio_wav(name)));
             match from_sound_data {
                 Some(wav) => {
                     from_mw2 += 1;
@@ -109,6 +116,8 @@ impl Sounds {
             footstep: take(FOOTSTEP, footstep),
             jump: take(JUMP, jump),
             land: take(LAND, land),
+            promotion: take(PROMOTION, promotion),
+            prestige: take(PRESTIGE, prestige),
         };
         // Which cues did not come from the sound data: a renamed alias shows up here rather than
         // as a cue that quietly became a synthesised clip.
@@ -119,36 +128,6 @@ impl Sounds {
         }
         sounds
     }
-}
-
-/// Build the cues once, reading the Modern Warfare 2 install when there is one.
-pub fn setup_sounds(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) {
-    let started = std::time::Instant::now();
-    let bank = spdesc_game_core::mw2_data().map(|install| {
-        let bank = SoundBank::read(&install, &spdesc_mw2::EFFECT_ZONES);
-        if bank.alias_count() == 0 {
-            warn!(
-                "sounds: {} holds no readable sound data — using the synthesised cues",
-                install.display()
-            );
-        } else {
-            info!(
-                "sounds: {} aliases from {} zone(s) of {} in {:.1} s",
-                bank.alias_count(),
-                bank.zones().len(),
-                install.display(),
-                started.elapsed().as_secs_f32()
-            );
-        }
-        for (zone, error) in bank.failures() {
-            warn!("sounds: {zone}.ff could not be read — {error}");
-        }
-        bank
-    });
-    if bank.is_none() {
-        info!("sounds: no MW2_DATA folder found — using the synthesised cues");
-    }
-    commands.insert_resource(Sounds::load(&mut sources, bank.as_ref()));
 }
 
 /// Play `sound` once, at `volume`, and let it clean itself up.
@@ -358,6 +337,44 @@ fn jump() -> Vec<f32> {
         .collect()
 }
 
+/// Reaching a rank: a rising three-note fanfare, the synthesised stand-in for the promotion cue.
+fn promotion() -> Vec<f32> {
+    (0..seconds(0.55))
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            let mut sample = 0.0;
+            for (step, note) in [523.25_f32, 659.25, 783.99].into_iter().enumerate() {
+                let at = step as f32 * 0.12;
+                if t < at {
+                    continue;
+                }
+                let held = t - at;
+                sample += (TAU * note * held).sin() * decay(held, 6.0) * 0.45;
+            }
+            sample
+        })
+        .collect()
+}
+
+/// Prestiging: a longer, higher fanfare over the promotion's.
+fn prestige() -> Vec<f32> {
+    (0..seconds(0.95))
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            let mut sample = 0.0;
+            for (step, note) in [523.25_f32, 659.25, 783.99, 1046.5].into_iter().enumerate() {
+                let at = step as f32 * 0.14;
+                if t < at {
+                    continue;
+                }
+                let held = t - at;
+                sample += (TAU * note * held).sin() * decay(held, 4.5) * 0.4;
+            }
+            sample
+        })
+        .collect()
+}
+
 /// Touchdown: a heavier, longer thump than a footfall.
 fn land() -> Vec<f32> {
     let mut noise = Noise::new(0x5eed_0008);
@@ -425,7 +442,7 @@ mod tests {
             spdesc_game_core::MW2.skip("no MW2_DATA folder found");
             return;
         };
-        let bank = SoundBank::read(&install, &spdesc_mw2::EFFECT_ZONES);
+        let bank = SoundBank::read(&install, &spdesc_mw2::ZONES);
         assert!(
             bank.alias_count() > 0,
             "{} resolved but no zone yielded any alias: {:?}",

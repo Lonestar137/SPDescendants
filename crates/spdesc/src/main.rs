@@ -11,6 +11,7 @@ mod combat;
 mod content;
 mod hair;
 mod player;
+mod progress;
 mod settings;
 
 use bevy::asset::RenderAssetUsages;
@@ -21,7 +22,10 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 
-use audio::setup_sounds;
+use progress::{award_experience, debug_progress, draw_progress, setup_progress};
+use spdesc_mw2::SoundBank;
+
+use audio::Sounds;
 use combat::{
     Muzzle, Weapon, WeaponRig, age_effects, fire_weapon, spawn_enemies, tick_weapon, update_targets,
 };
@@ -56,7 +60,8 @@ fn main() {
                 setup_scene,
                 grab_cursor,
                 setup_hud,
-                setup_sounds,
+                setup_progress,
+                setup_mw2,
                 setup_character,
             ),
         )
@@ -67,6 +72,9 @@ fn main() {
                 rebuild_model,
                 draw_menu,
                 draw_hud,
+                draw_progress,
+                award_experience,
+                debug_progress,
                 (
                     toggle_cursor,
                     drive_player,
@@ -84,6 +92,70 @@ fn main() {
                 .chain(),
         )
         .run();
+}
+
+/// Read the Modern Warfare 2 install once and build everything that comes out of it: the sound
+/// cues, the rank table, and the insignia art. Each piece stands on its own — with no install the
+/// cues are synthesised, the career stays empty and the HUD hides.
+fn setup_mw2(
+    mut commands: Commands,
+    mut sources: ResMut<Assets<AudioSource>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let started = std::time::Instant::now();
+    let install = spdesc_game_core::mw2_data();
+    let bank = install
+        .as_deref()
+        .map(|install| SoundBank::read(install, &spdesc_mw2::ZONES));
+    match &bank {
+        Some(bank) if bank.alias_count() > 0 => {
+            info!(
+                "sound data: {} aliases and {} table(s) from {} zone(s) of {} in {:.1} s",
+                bank.alias_count(),
+                bank.zones()
+                    .iter()
+                    .map(|(_, data)| data.tables.len())
+                    .sum::<usize>(),
+                bank.zones().len(),
+                install
+                    .as_deref()
+                    .unwrap_or(std::path::Path::new("?"))
+                    .display(),
+                started.elapsed().as_secs_f32()
+            );
+            for (zone, error) in bank.failures() {
+                warn!("sound data: {zone}.ff could not be read — {error}");
+            }
+        }
+        Some(bank) => warn!(
+            "sound data: {} holds no readable data — {:#?}",
+            install
+                .as_deref()
+                .unwrap_or(std::path::Path::new("?"))
+                .display(),
+            bank.failures()
+        ),
+        None => info!("sound data: no MW2_DATA folder found — using the synthesised cues"),
+    }
+
+    let career =
+        progress::Career::from_zones(bank.as_ref().map(|bank| bank.zones()).unwrap_or(&[]));
+    if career.is_loaded() {
+        let ranks = career.ranks();
+        info!(
+            "progression: {} ranks to {}, {prestige} prestige levels available",
+            ranks.len(),
+            ranks.last_index().map(|last| last + 1).unwrap_or(0),
+            prestige = ranks.max_prestige()
+        );
+    } else {
+        info!("progression: no rank table — the career and its HUD stay hidden");
+    }
+    let insignia = progress::load_insignia(install.as_deref(), &career, &mut images);
+
+    commands.insert_resource(Sounds::load(&mut sources, bank.as_ref()));
+    commands.insert_resource(career);
+    commands.insert_resource(insignia);
 }
 
 /// Camera, light, and the flat ground the MVP plays on. The ground is a tiled checker and there

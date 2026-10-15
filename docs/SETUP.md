@@ -81,7 +81,9 @@ test -d "$MW2_DATA/main" && test -d "$MW2_DATA/zone/english"
 ```
 
 The folder is read-only runtime input, exactly like `TFD_DATA`: the app reads the fastfiles in it
-and never writes into it. No key or mapping is needed for it.
+and never writes into it. No key or mapping is needed for it. Besides the sound effects it supplies
+the rank table and the rank and prestige insignia, so the level and prestige system needs this
+folder too — without it the career and its HUD stay hidden.
 
 ## 4. Add your AES key to local state
 

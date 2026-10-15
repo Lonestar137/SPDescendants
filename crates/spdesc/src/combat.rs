@@ -13,6 +13,7 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use spdesc_game_core::combat::{Combat, FireError, Shot, Target, WeaponParams};
 
 use crate::audio::{self, Sounds};
+use crate::progress::{self, Career};
 
 /// Seconds a downed target stays down before it pops back up.
 const RESPAWN_SECONDS: f32 = 4.0;
@@ -137,6 +138,7 @@ pub fn fire_weapon(
     muzzles: Query<(Entity, &GlobalTransform), With<Muzzle>>,
     mut rigs: Query<&mut WeaponRig>,
     sounds: Res<Sounds>,
+    mut career: ResMut<Career>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut weapons: Query<&mut Weapon>,
@@ -188,7 +190,11 @@ pub fn fire_weapon(
                     enemy.target.health -= damage;
                     enemy.target.health = enemy.target.health.max(0.0);
                 }
-                let _ = killed;
+                // A hit is worth experience, and a target that went down is worth a kill's.
+                progress::grant(&mut career, progress::HIT_XP);
+                if killed {
+                    progress::grant(&mut career, progress::KILL_XP);
+                }
                 let start = muzzle.map_or(origin_bevy, |(_, at)| at);
                 let hit = to_bevy(point);
                 audio::play(&mut commands, &sounds.shot, 0.5);
@@ -612,6 +618,8 @@ mod tests {
             footstep: default(),
             jump: default(),
             land: default(),
+            promotion: default(),
+            prestige: default(),
         });
         app.add_systems(Update, update_targets);
 

@@ -51,6 +51,12 @@ face column; use up/down to change its selection; press `Enter` to apply, or `Es
 Otherwise: `WASD`/arrows move, `Shift` sprints, `Space` jumps, the mouse orbits, right-click aims,
 hold left-click to fire, and `R` reloads.
 
+Each target pays experience — a hit is worth 10 and a kill 100 — against Modern Warfare 2's own
+rank table, so the bottom-left panel shows the level, the rank insignia, and how far the next rank
+is. Reaching one rings the game's promotion fanfare; the ten prestige insignia are read from the
+same install. `P` grants a chunk of experience and `O` takes the prestige on offer once the last
+rank is held, which is the quick way to walk the whole system.
+
 Character names come from `spdesc-config/roster.json` (a small id → name index, like the key and
 property mapping beside it); without it characters are labelled by their id.
 

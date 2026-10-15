@@ -53,6 +53,7 @@ parser.
 | [DATA-TABLE-SCHEMA.md](DATA-TABLE-SCHEMA.md) | Status and limits of data-table schema research | No production table reader yet |
 | [MECHANICS-EVIDENCE.md](MECHANICS-EVIDENCE.md) | Client metadata evidence that can guide future local rules | `spdesc-game-core` remains the authority for game rules |
 | [MW2-AUDIO.md](MW2-AUDIO.md) | Modern Warfare 2 fastfiles: sound aliases and the audio they name | `crates/spdesc-mw2`, on the container vendored from IW4L under `vendor/iw4/` |
+| [MW2-PROGRESSION.md](MW2-PROGRESSION.md) | Modern Warfare 2's rank table, rank and prestige insignia, and promotion cues | `spdesc-game-core::progression`, `crates/spdesc/src/progress.rs` |
 
 The historical probes, raw outputs, downloaded third-party material, and
 extracted data remain local under the ignored `spdesc-config/` state root. They
