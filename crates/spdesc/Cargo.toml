@@ -15,6 +15,9 @@ spdesc-game-core = { path = "../spdesc-game-core", default-features = false }
 # The runtime asset reader: container, Zen package, `USkeletalMesh` render data, `UTexture2D`.
 # `default-features = false` for the same reason as `spdesc-game-core`.
 spdesc-data = { path = "../spdesc-data", default-features = false }
+# The sound effects: Modern Warfare 2's own cues, read from MW2_DATA. `default-features = false`
+# for the same reason as the other resolvers.
+spdesc-mw2 = { path = "../spdesc-mw2", default-features = false }
 # Reading the (gitignored) character-name roster beside the key and mapping.
 serde_json = "1"
 

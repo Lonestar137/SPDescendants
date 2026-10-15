@@ -1,0 +1,27 @@
+[package]
+name = "spdesc-mw2"
+description = "Read MW2_DATA fastfiles: sound aliases and the audio payloads they name"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["dev"]
+# Mirrors `spdesc-game-core`'s feature: `dev` lets the resolver fall back to this checkout's
+# `MW2_DATA` link. A shipped build declares `default-features = false`.
+dev = ["spdesc-game-core/dev"]
+
+[dependencies]
+anyhow.workspace = true
+spdesc-game-core = { path = "../spdesc-game-core", default-features = false }
+# Inflate: the zlib stream a fastfile's header sits over. Pure Rust (miniz_oxide backend).
+flate2.workspace = true
+# Vendored IW4L crates (Apache-2.0): the zone container and the retail asset layouts it decodes
+# into. They are outside the workspace `members` list on purpose — third-party source stays
+# unreformatted and unlinted by this repository's gates. See `vendor/iw4/README.md`.
+asset_iw4 = { path = "../../vendor/iw4/asset_iw4" }
+fastfile_iw4 = { path = "../../vendor/iw4/fastfile_iw4" }
+
+[lints]
+workspace = true

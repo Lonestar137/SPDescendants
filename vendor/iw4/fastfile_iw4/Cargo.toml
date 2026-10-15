@@ -1,0 +1,14 @@
+[package]
+name = "fastfile_iw4"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Retail IW4 zone container: header, stream, pointer fixup, asset table."
+
+[dependencies]
+asset_iw4 = { path = "../asset_iw4" }
+
+# Its own workspace root, so this repository's workspace selection, formatting and lint levels do
+# not reach vendored third-party source. See `vendor/iw4/README.md`.
+[workspace]

@@ -1,0 +1,13 @@
+[package]
+name = "d3d9_state"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "D3D9 render-state, blend, compare, cull, and sampler value semantics. No IW4 knowledge."
+
+[dependencies]
+
+# Its own workspace root, so this repository's workspace selection, formatting and lint levels do
+# not reach vendored third-party source. See `vendor/iw4/README.md`.
+[workspace]

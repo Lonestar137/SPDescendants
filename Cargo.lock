@@ -333,6 +333,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "asset_iw4"
+version = "0.1.0"
+dependencies = [
+ "d3d9_decl",
+ "d3d9_state",
+]
+
+[[package]]
 name = "async-broadcast"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2466,6 +2474,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
+name = "d3d9_decl"
+version = "0.1.0"
+
+[[package]]
+name = "d3d9_state"
+version = "0.1.0"
+
+[[package]]
 name = "dasp_sample"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2684,6 +2700,13 @@ checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
  "event-listener",
  "pin-project-lite",
+]
+
+[[package]]
+name = "fastfile_iw4"
+version = "0.1.0"
+dependencies = [
+ "asset_iw4",
 ]
 
 [[package]]
@@ -5124,6 +5147,7 @@ dependencies = [
  "serde_json",
  "spdesc-data",
  "spdesc-game-core",
+ "spdesc-mw2",
 ]
 
 [[package]]
@@ -5140,6 +5164,17 @@ dependencies = [
 [[package]]
 name = "spdesc-game-core"
 version = "0.1.0"
+
+[[package]]
+name = "spdesc-mw2"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "asset_iw4",
+ "fastfile_iw4",
+ "flate2",
+ "spdesc-game-core",
+]
 
 [[package]]
 name = "spin"

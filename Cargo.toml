@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# Vendored third-party source lives outside the member list on purpose (vendor/iw4/README.md):
+# this repository's fmt and lint gates must not reach it.
+exclude = ["vendor/iw4/fastfile_iw4", "vendor/iw4/asset_iw4", "vendor/iw4/d3d9_decl", "vendor/iw4/d3d9_state"]
 
 [workspace.package]
 version = "0.1.0"
@@ -16,6 +19,9 @@ too_many_arguments = "allow"
 
 [workspace.dependencies]
 anyhow = "1.0"
+# Reading a Modern Warfare 2 fastfile: the zlib stream its 21-byte header sits over. Pure Rust
+# (the miniz_oxide backend), so the sound reader needs no C toolchain.
+flate2 = "1"
 # bevy's default features spelled out without `audio`: `2d`, `3d` and `ui` each pull `bevy_audio`
 # and a codec. Add a feature by name, never `2d`/`3d`/`ui`; a plugin that takes bevy with its
 # default features brings the audio stack back too.

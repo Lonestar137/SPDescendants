@@ -1,10 +1,15 @@
-//! Procedurally synthesised sound effects.
+//! The sound cues: Modern Warfare 2's own effects where that install is present, synthesised
+//! clips otherwise.
 //!
-//! The game's audio lives inside Wwise banks rather than as decodable media, so — unlike the meshes
-//! and textures — there is nothing in `GAME_DATA` to read. These are generated here instead: small
-//! mono 16-bit WAV clips built from seeded noise and sine bursts. That keeps the app self-contained
-//! (nothing to ship, nothing to licence) and deterministic (the same seed always gives the same
-//! samples), which is also what makes them testable.
+//! The game's audio is not in the loose files. `TFD_DATA` has no sound at all, and Modern Warfare
+//! 2 keeps the weapon, foley and feedback cues inside its fastfiles — so `MW2_DATA` is read
+//! through `crates/spdesc-mw2`, which walks `zone/english/common.ff` and hands back each alias's
+//! audio. `docs/research/MW2-AUDIO.md` records the walk and the names chosen.
+//!
+//! Nothing needs to ship either way: with no `MW2_DATA` the cues below are generated here instead
+//! — small mono 16-bit WAV clips built from seeded noise and sine bursts, which keeps the app
+//! self-contained (nothing to licence), deterministic (the same seed always gives the same
+//! samples) and testable (a test checks every clip is a well-formed, audible WAV).
 //!
 //! Every clip is a one-shot: [`play`] spawns a [`AudioPlayer`] that Bevy despawns when it finishes.
 
@@ -14,8 +19,41 @@ use std::sync::Arc;
 use bevy::audio::{AudioSource, Volume};
 use bevy::prelude::*;
 
+use spdesc_mw2::SoundBank;
+
 /// The sample rate of every generated clip.
 const RATE: u32 = 44_100;
+
+// ── Where each cue comes from in Modern Warfare 2 ───────────────────────────────────────────────
+// Measured on `<MW2_DATA>/zone/english/common.ff`: 7570 aliases over 9288 assets, read in about
+// 1.5 s (docs/research/MW2-AUDIO.md). An alias is the name the game itself asks for, so these are
+// the game's cues rather than approximations; the first name that resolves wins, and each cue
+// falls back to the synthesised clip underneath when the install is absent.
+//
+// The weapon family is the M4A1 (`weap_m4carbine_*`), Modern Warfare 2's assault rifle — the same
+// weapon the app models (`A001RW_AR_1001` is an AR).
+
+/// The shot: one round of the M4A1, stereo, 1.34 s including its tail.
+const SHOT: &[&str] = &["weap_m4carbine_fire_plr"];
+/// The trigger falling on an empty magazine.
+const DRY: &[&str] = &["weap_dryfire_rifle_plr"];
+/// The hitmarker: the game's own 34 ms feedback tick.
+const HIT: &[&str] = &["player_feedback_hit_alert"];
+/// A target going down: the headshot impact.
+const KILL: &[&str] = &["bullet_impact_headshot"];
+/// A reload begins: the magazine coming out.
+const RELOAD_START: &[&str] = &["weap_m4carbine_clipout_plr"];
+/// A reload finishes: the magazine in and the bolt released.
+const RELOAD_END: &[&str] = &[
+    "weap_m4carbine_clipin_plr",
+    "weap_m4carbine_chamber_close_plr",
+];
+/// A footfall. The game has no jump cue — no alias in the zone names one — so moving off uses the
+/// gear-rattle foley the game plays when the player mantles.
+const FOOTSTEP: &[&str] = &["step_run_default", "step_walk_default"];
+const JUMP: &[&str] = &["gear_rattle_plr_mantle"];
+/// Touchdown.
+const LAND: &[&str] = &["Land_plr_default"];
 
 /// Every sound the game plays, built once at startup.
 #[derive(Resource)]
@@ -41,26 +79,76 @@ pub struct Sounds {
 }
 
 impl Sounds {
-    /// Build every clip into the audio assets.
-    pub fn load(sources: &mut Assets<AudioSource>) -> Sounds {
-        let mut add = |samples: Vec<f32>| sources.add(source(&samples));
-        Sounds {
-            shot: add(shot()),
-            dry: add(dry()),
-            hit: add(hit()),
-            kill: add(kill()),
-            reload_start: add(reload_start()),
-            reload_end: add(reload_end()),
-            footstep: add(footstep()),
-            jump: add(jump()),
-            land: add(land()),
+    /// Build every cue: Modern Warfare 2's own audio where that install resolves, the synthesised
+    /// clip otherwise.
+    pub fn load(sources: &mut Assets<AudioSource>, mw2: Option<&SoundBank>) -> Sounds {
+        let mut from_mw2 = 0usize;
+        let mut synthesised = 0usize;
+        let mut take = |aliases: &[&str], synth: fn() -> Vec<f32>| -> Handle<AudioSource> {
+            let from_sound_data = mw2
+                .and_then(|bank| aliases.iter().find_map(|name| bank.payload(name)))
+                .and_then(|payload| payload.to_wav());
+            match from_sound_data {
+                Some(wav) => {
+                    from_mw2 += 1;
+                    sources.add(wav_source(wav))
+                }
+                None => {
+                    synthesised += 1;
+                    sources.add(source(&synth()))
+                }
+            }
+        };
+        let sounds = Sounds {
+            shot: take(SHOT, shot),
+            dry: take(DRY, dry),
+            hit: take(HIT, hit),
+            kill: take(KILL, kill),
+            reload_start: take(RELOAD_START, reload_start),
+            reload_end: take(RELOAD_END, reload_end),
+            footstep: take(FOOTSTEP, footstep),
+            jump: take(JUMP, jump),
+            land: take(LAND, land),
+        };
+        // Which cues did not come from the sound data: a renamed alias shows up here rather than
+        // as a cue that quietly became a synthesised clip.
+        if synthesised > 0 {
+            info!("sounds: {from_mw2} cues from the sound data, {synthesised} synthesised");
+        } else {
+            info!("sounds: all {from_mw2} cues from the sound data");
         }
+        sounds
     }
 }
 
-/// Build the sounds once, as a resource every player of them reads.
+/// Build the cues once, reading the Modern Warfare 2 install when there is one.
 pub fn setup_sounds(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) {
-    commands.insert_resource(Sounds::load(&mut sources));
+    let started = std::time::Instant::now();
+    let bank = spdesc_game_core::mw2_data().map(|install| {
+        let bank = SoundBank::read(&install, &spdesc_mw2::EFFECT_ZONES);
+        if bank.alias_count() == 0 {
+            warn!(
+                "sounds: {} holds no readable sound data — using the synthesised cues",
+                install.display()
+            );
+        } else {
+            info!(
+                "sounds: {} aliases from {} zone(s) of {} in {:.1} s",
+                bank.alias_count(),
+                bank.zones().len(),
+                install.display(),
+                started.elapsed().as_secs_f32()
+            );
+        }
+        for (zone, error) in bank.failures() {
+            warn!("sounds: {zone}.ff could not be read — {error}");
+        }
+        bank
+    });
+    if bank.is_none() {
+        info!("sounds: no MW2_DATA folder found — using the synthesised cues");
+    }
+    commands.insert_resource(Sounds::load(&mut sources, bank.as_ref()));
 }
 
 /// Play `sound` once, at `volume`, and let it clean itself up.
@@ -94,8 +182,16 @@ fn source(samples: &[f32]) -> AudioSource {
         let clamped = sample.clamp(-1.0, 1.0);
         bytes.extend_from_slice(&((clamped * i16::MAX as f32) as i16).to_le_bytes());
     }
+    wav_source(bytes)
+}
+
+/// A WAV file's bytes as an [`AudioSource`].
+///
+/// This is the path a Modern Warfare 2 payload takes: its audio is already PCM, and
+/// [`spdesc_mw2::LoadedSound::to_wav`] wraps it in the header Bevy's decoder expects.
+fn wav_source(wav: Vec<u8>) -> AudioSource {
     AudioSource {
-        bytes: Arc::from(bytes.into_boxed_slice()),
+        bytes: Arc::from(wav.into_boxed_slice()),
     }
 }
 
@@ -317,5 +413,56 @@ mod tests {
     fn clips_are_deterministic() {
         assert_eq!(shot(), shot());
         assert_eq!(footstep(), footstep());
+    }
+
+    /// Every alias the cues name is really in the install, and carries audio the app can play.
+    ///
+    /// This is the check that keeps the table above honest: a renamed or mistyped alias would
+    /// silently fall back to a synthesised clip, and the cues would stop being the game's.
+    #[test]
+    fn every_named_cue_exists_and_carries_audio() {
+        let Some(install) = spdesc_game_core::mw2_data() else {
+            spdesc_game_core::MW2.skip("no MW2_DATA folder found");
+            return;
+        };
+        let bank = SoundBank::read(&install, &spdesc_mw2::EFFECT_ZONES);
+        assert!(
+            bank.alias_count() > 0,
+            "{} resolved but no zone yielded any alias: {:?}",
+            install.display(),
+            bank.failures()
+        );
+
+        // One list of the cue tables: a cue added above must be added here, and the aliases it
+        // names are the same constants the loader uses.
+        let cues: &[(&str, &[&str])] = &[
+            ("shot", SHOT),
+            ("dry", DRY),
+            ("hit", HIT),
+            ("kill", KILL),
+            ("reload_start", RELOAD_START),
+            ("reload_end", RELOAD_END),
+            ("footstep", FOOTSTEP),
+            ("jump", JUMP),
+            ("land", LAND),
+        ];
+        let mut missing = Vec::new();
+        for (cue, aliases) in cues {
+            assert!(!aliases.is_empty(), "cue `{cue}` names no alias");
+            for name in *aliases {
+                match bank.payload(name) {
+                    Some(payload) if payload.to_wav().is_some() => {}
+                    Some(payload) => missing.push(format!(
+                        "{cue}: `{name}` is format {} x{} {} bit, not playable PCM",
+                        payload.format, payload.channels, payload.bits
+                    )),
+                    None => missing.push(format!("{cue}: `{name}` is not in the sound data")),
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "the cues do not match the installed sound data: {missing:#?}"
+        );
     }
 }
