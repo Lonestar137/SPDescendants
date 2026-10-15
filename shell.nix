@@ -28,7 +28,7 @@ pkgs.mkShell {
 
   shellHook = ''
     if [ -z "''${CARGO_TARGET_DIR:-}" ] && [ -d /mnt/ventoy/tmp/cache ]; then
-      export CARGO_TARGET_DIR=/mnt/ventoy/tmp/cache
+      export CARGO_TARGET_DIR=/mnt/ventoy/tmp/spdesc
     fi
     # Player state must not ride $CARGO_TARGET_DIR (which may be a scratch disk): pin the state
     # folder to the tree so saves/settings persist independently of where the build lands.
