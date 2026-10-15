@@ -14,7 +14,8 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use spdesc_data::anim::AnimClip;
 use spdesc_game_core::movement::{Character, MoveIntent, MovementParams};
 
-use crate::content::Skeleton;
+use crate::combat::Weapon;
+use crate::content::{Locomotion, Reload, Skeleton};
 
 /// Degrees of camera yaw/pitch per count of mouse motion.
 const MOUSE_SENSITIVITY: f64 = 0.12;
@@ -51,16 +52,19 @@ pub struct CameraRig {
 #[derive(Component)]
 pub struct Animator {
     pub clips: Vec<AnimClip>,
-    pub idle: usize,
-    pub walk: usize,
-    pub run: usize,
-    pub jump: usize,
-    pub air: usize,
-    pub land: usize,
-    pub aim: usize,
     pub bone_to_track: Vec<Vec<Option<usize>>>,
-    /// Which bones the aim pose overrides (the spine from `Spine1` up, arms and head).
+    /// The unarmed locomotion set, and the armed (two-handed) one used while carrying a weapon.
+    pub base: Locomotion,
+    pub armed: Option<Locomotion>,
+    /// The aim-down-sights pose, and the weapon reload's halves.
+    pub aim: usize,
+    pub reload: Option<Reload>,
+    /// Which bones the aim and reload poses override (the spine from `Spine1` up, arms and head).
     pub upper: Vec<bool>,
+    /// The bone the upper-body layer pivots at, and the weapon's socket on the hand. Aiming rotates
+    /// the upper body so the socket's `+X` (the barrel) lands on the aim direction.
+    pub upper_root: usize,
+    pub weapon_socket: Option<usize>,
     /// The eased weight of the aim layer, and its looping time through the aim clip.
     pub ads: f32,
     pub aim_time: f32,
@@ -93,6 +97,19 @@ const BLEND_SECONDS: f32 = 0.18;
 const ADS_SECONDS: f32 = 0.14;
 /// The bone the aim layer starts at; it and its descendants take the aim pose.
 const UPPER_BODY_ROOT: &str = "Bip001-Spine1";
+/// How far the upper body may pitch to follow the camera, radians.
+const AIM_LEAN_MAX: f32 = 0.6;
+/// The most the upper body may turn to bring the barrel onto the aim line, radians.
+const AIM_TURN_MAX: f32 = 1.0;
+
+/// The index of the bone the aim layer pivots at (`Bip001-Spine1`), or 0.
+pub fn upper_body_root(skeleton: &Skeleton) -> usize {
+    skeleton
+        .names
+        .iter()
+        .position(|name| name == UPPER_BODY_ROOT)
+        .unwrap_or(0)
+}
 
 /// The bones the aim pose overrides: `UPPER_BODY_ROOT` and every descendant (neck, head,
 /// clavicles, arms, hands, fingers). The pelvis and legs keep the locomotion pose, so the character
@@ -175,18 +192,22 @@ fn phase(grounded: bool, air_timer: f32, land_timer: f32, jump_duration: f32) ->
 /// locomotion. Nothing plays a landing pose until the character is actually on the ground.
 pub fn animate_locomotion(
     time: Res<Time>,
-    mut players: Query<(&Player, &mut Animator)>,
+    rigs: Query<&CameraRig>,
+    mut players: Query<(&Player, &mut Animator, Option<&Weapon>)>,
     mut transforms: Query<&mut Transform>,
 ) {
     let dt = time.delta_secs();
-    for (player, mut animator) in &mut players {
+    let aim_pitch = rigs.single().map(|rig| rig.pitch as f32).unwrap_or(0.0);
+    for (player, mut animator, weapon) in &mut players {
         let grounded = player.character.grounded;
         let velocity = player.character.velocity;
         let speed = velocity[0].hypot(velocity[1]);
 
-        let jump_duration = clip_duration(&animator.clips[animator.jump]);
-        let air_duration = clip_duration(&animator.clips[animator.air]);
-        let land_duration = clip_duration(&animator.clips[animator.land]);
+        // The armed stance replaces the unarmed locomotion wholesale while carrying a weapon.
+        let loco = animator.armed.unwrap_or(animator.base);
+        let jump_duration = clip_duration(&animator.clips[loco.jump]);
+        let air_duration = clip_duration(&animator.clips[loco.air]);
+        let land_duration = clip_duration(&animator.clips[loco.land]);
 
         if grounded {
             if !animator.was_grounded {
@@ -205,23 +226,23 @@ pub fn animate_locomotion(
             animator.land_timer,
             jump_duration,
         ) {
-            Phase::Jump => (animator.jump, animator.air_timer, false),
+            Phase::Jump => (loco.jump, animator.air_timer, false),
             Phase::Air => {
                 let at = (animator.air_timer - jump_duration) % air_duration.max(1e-3);
-                (animator.air, at, true)
+                (loco.air, at, true)
             }
             Phase::Land => {
                 let at = land_duration - animator.land_timer;
                 animator.land_timer = (animator.land_timer - dt).max(0.0);
-                (animator.land, at, false)
+                (loco.land, at, false)
             }
             Phase::Local => {
                 let index = if speed > 600.0 {
-                    animator.run
+                    loco.run
                 } else if speed > 20.0 {
-                    animator.walk
+                    loco.walk
                 } else {
-                    animator.idle
+                    loco.idle
                 };
                 let duration = clip_duration(&animator.clips[index]);
                 animator.time = (animator.time + dt) % duration.max(1e-3);
@@ -300,6 +321,41 @@ pub fn animate_locomotion(
                 local.rotation = local.rotation.slerp(aim_local.rotation, weight);
                 local.scale = local.scale.lerp(aim_local.scale, weight);
             }
+            // The character faces the camera's yaw while aiming, so its own yaw plus the camera's
+            // pitch is the aim direction.
+            let aim_dir = look_direction_to_bevy(player.character.yaw, aim_pitch as f64);
+            let entity_yaw = player.character.yaw.to_radians() as f32 + MODEL_YAW_OFFSET;
+            if !aim_weapon(&animator, &mut locals, aim_dir, entity_yaw, weight) {
+                // Without a weapon to align, at least pitch the torso to follow the camera.
+                lean_upper_body(&animator, &mut locals, aim_pitch * weight);
+            }
+        }
+
+        // A reload overrides both halves: the upper body works the weapon, the lower body shifts.
+        // The weapon owns the timer, so the pose tracks the reload rather than restarting it.
+        let reload_left = weapon.map_or(0.0, |weapon| weapon.combat.reload_remaining as f32);
+        if let Some(reload) = animator.reload
+            && reload_left > 0.0
+        {
+            let total = clip_duration(&animator.clips[reload.upper]);
+            let at = (total - reload_left).max(0.0);
+            for (index, upper) in [(reload.upper, true), (reload.lower, false)] {
+                let clip = &animator.clips[index];
+                let sample = sample_at(clip, at, false);
+                let posed = crate::content::pose_bone_locals(
+                    &animator.skeleton,
+                    clip,
+                    &animator.bone_to_track[index],
+                    sample,
+                );
+                for ((local, posed), is_upper) in
+                    locals.iter_mut().zip(posed.iter()).zip(&animator.upper)
+                {
+                    if *is_upper == upper {
+                        *local = *posed;
+                    }
+                }
+            }
         }
 
         for (entity, local) in animator.bones.iter().zip(locals.iter()) {
@@ -308,6 +364,94 @@ pub fn animate_locomotion(
             }
         }
     }
+}
+
+/// The model-space rotation of `bone` from the sampled locals, composing up its parent chain.
+fn model_world_rot(animator: &Animator, locals: &[Transform], bone: usize) -> Quat {
+    let mut chain = Vec::new();
+    let mut bone = bone as i32;
+    while bone >= 0 {
+        chain.push(bone as usize);
+        bone = animator.skeleton.parents[bone as usize];
+    }
+    let mut world = Quat::IDENTITY;
+    for &b in chain.iter().rev() {
+        world *= locals[b].rotation;
+    }
+    world
+}
+
+/// Turn the whole upper body so the weapon's barrel (the socket's `+X`) points along `aim_dir`.
+///
+/// The aim pose alone holds the rifle *at the ready* — authored for the weapon, but its barrel sits
+/// well off the sight line (the game adds an aim-offset blend on top, which this MVP does not
+/// decode). Rotating the upper body onto the barrel closes that, so the rifle and the reticle
+/// agree. Returns false when the character has no weapon to align.
+fn aim_weapon(
+    animator: &Animator,
+    locals: &mut [Transform],
+    aim_dir: Vec3,
+    entity_yaw: f32,
+    weight: f32,
+) -> bool {
+    let Some(socket) = animator.weapon_socket else {
+        return false;
+    };
+    let root = animator.upper_root;
+    if socket >= locals.len() || root >= locals.len() {
+        return false;
+    }
+    let barrel = model_world_rot(animator, locals, socket) * Vec3::X;
+    // The aim direction in the model's own frame: the bones hang off the model root, whose rotation
+    // (the character's yaw plus the model's quarter turn) the caller supplies.
+    let model_aim = Quat::from_rotation_y(entity_yaw).inverse() * aim_dir;
+    let turn = Quat::IDENTITY.slerp(clamped_arc(barrel, model_aim), weight.clamp(0.0, 1.0));
+    if turn.angle_between(Quat::IDENTITY) < 1e-4 {
+        return true;
+    }
+    // Re-express the model-space turn in the root bone's parent frame, then prepend it.
+    let parent = animator.skeleton.parents[root];
+    let parent_world = if parent >= 0 {
+        model_world_rot(animator, locals, parent as usize)
+    } else {
+        Quat::IDENTITY
+    };
+    let local_turn = parent_world.inverse() * turn * parent_world;
+    locals[root].rotation = local_turn * locals[root].rotation;
+    true
+}
+
+/// `from_rotation_arc`, with the angle clamped so a wild pose cannot spin the torso around.
+fn clamped_arc(from: Vec3, to: Vec3) -> Quat {
+    if from.length_squared() <= 0.0 || to.length_squared() <= 0.0 {
+        return Quat::IDENTITY;
+    }
+    let rotation = Quat::from_rotation_arc(from, to);
+    let (axis, angle) = rotation.to_axis_angle();
+    if angle <= AIM_TURN_MAX || !axis.is_finite() {
+        rotation
+    } else {
+        Quat::from_axis_angle(axis, AIM_TURN_MAX)
+    }
+}
+
+/// Pitch the upper body at `lean` radians about the character's right axis, so the rifle follows
+/// the camera up and down. The axis is the character's `+X` expressed in the bone's parent frame,
+/// which needs the parent chain's rotation from the sampled locals.
+fn lean_upper_body(animator: &Animator, locals: &mut [Transform], lean: f32) {
+    let lean = lean.clamp(-AIM_LEAN_MAX, AIM_LEAN_MAX);
+    let root = animator.upper_root;
+    if lean.abs() < 1e-4 || root >= locals.len() {
+        return;
+    }
+    let mut parent_world = Quat::IDENTITY;
+    let mut parent = animator.skeleton.parents[root];
+    while parent >= 0 {
+        parent_world = locals[parent as usize].rotation * parent_world;
+        parent = animator.skeleton.parents[parent as usize];
+    }
+    let axis = parent_world.inverse() * Vec3::X;
+    locals[root].rotation = Quat::from_axis_angle(axis, lean) * locals[root].rotation;
 }
 
 /// The character mesh is authored facing the game's `+Y` (its right axis) rather than `+X` (the
@@ -384,7 +528,10 @@ pub fn drive_player(
         .unwrap_or(true);
     if grabbed {
         for mut rig in &mut rigs {
-            rig.yaw = (rig.yaw + f64::from(mouse.delta.x) * MOUSE_SENSITIVITY).rem_euclid(360.0);
+            // The game frame is left-handed (+X forward, +Z up), so a *larger* yaw turns the view
+            // left. A rightward mouse move must therefore *decrease* the yaw, or the look (and, now
+            // that aiming pins the character to the camera, the rifle) swings the wrong way.
+            rig.yaw = (rig.yaw - f64::from(mouse.delta.x) * MOUSE_SENSITIVITY).rem_euclid(360.0);
             rig.pitch = (rig.pitch - f64::from(mouse.delta.y) * MOUSE_SENSITIVITY)
                 .clamp(-MAX_PITCH, MAX_PITCH);
         }
@@ -405,6 +552,9 @@ pub fn drive_player(
     let mut intent = MoveIntent {
         sprint: keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]),
         jump: keys.just_pressed(KeyCode::Space),
+        // Aiming turns the character onto the camera's yaw (so the rifle points where you look)
+        // while the input still steers relative to the camera, i.e. the character strafes.
+        aim_yaw: aiming.then_some(frame_yaw),
         ..default()
     };
     let down = |a: KeyCode, b: KeyCode| keys.pressed(a) || keys.pressed(b);
@@ -588,7 +738,11 @@ mod tests {
             .delta = Vec2::new(100.0, 0.0);
         app.update();
         let rig = app.world().entity(camera).get::<CameraRig>().unwrap();
-        assert!(rig.yaw > 1.0, "the camera must orbit with the mouse");
+        assert!(
+            (rig.yaw - 348.0).abs() < 1e-6,
+            "a rightward mouse move must turn the view right (yaw decreases, wrapping), got {}",
+            rig.yaw
+        );
         let character_yaw = app
             .world()
             .entity(player)
@@ -601,8 +755,8 @@ mod tests {
             "the character does not turn with the camera"
         );
 
-        // Camera-relative: forward now follows the orbited camera, so the step gains a -Z (game
-        // +Y) component instead of staying on +X.
+        // Camera-relative: forward now follows the orbited camera, so the step gains a +Z (the
+        // camera's right) component instead of staying on +X.
         app.world_mut()
             .resource_mut::<AccumulatedMouseMotion>()
             .delta = Vec2::ZERO;
@@ -612,7 +766,7 @@ mod tests {
         app.update();
         let transform = *app.world().entity(player).get::<Transform>().unwrap();
         assert!(
-            transform.translation.z < -0.01,
+            transform.translation.z > 0.01,
             "camera-relative movement must follow the camera yaw, got {:?}",
             transform.translation
         );

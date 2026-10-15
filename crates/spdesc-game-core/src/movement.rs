@@ -29,6 +29,9 @@ pub struct MovementParams {
     pub air_accel: f64,
     /// Turn rate toward the movement direction, degrees per second.
     pub turn_rate: f64,
+    /// Turn rate toward the aim direction while aiming, degrees per second. Aiming turns the
+    /// character onto its aim rather than its movement, and does so briskly.
+    pub aim_turn_rate: f64,
 }
 
 impl Default for MovementParams {
@@ -43,6 +46,7 @@ impl Default for MovementParams {
             gravity: 980.0,
             air_accel: 800.0,
             turn_rate: 720.0,
+            aim_turn_rate: 1440.0,
         }
     }
 }
@@ -58,6 +62,9 @@ pub struct MoveIntent {
     pub sprint: bool,
     /// Whether jump was pressed this step.
     pub jump: bool,
+    /// While aiming, the yaw to face regardless of movement (strafe), degrees. `None` follows the
+    /// movement direction instead.
+    pub aim_yaw: Option<f64>,
 }
 
 /// A character's kinematic state. Lengths are centimetres, angles degrees.
@@ -124,14 +131,24 @@ impl Character {
         if len > 1e-9 {
             wish[0] /= len;
             wish[1] /= len;
-            // Face the movement direction (shortest turn, respecting the turn rate).
-            let target = wish[1].atan2(wish[0]).to_degrees().rem_euclid(360.0);
-            let delta = (target - self.yaw + 540.0).rem_euclid(360.0) - 180.0;
-            let max_turn = params.turn_rate * dt;
-            self.yaw = (self.yaw + delta.clamp(-max_turn, max_turn)).rem_euclid(360.0);
         } else {
             wish = [0.0, 0.0];
         }
+        // Facing: aiming pins it to the aim yaw (so the character strafes while it shoots),
+        // otherwise it turns toward the movement direction. Either way the turn respects a rate.
+        let (target, rate) = if let Some(aim) = mv.aim_yaw {
+            (aim, params.aim_turn_rate)
+        } else if len > 1e-9 {
+            (
+                wish[1].atan2(wish[0]).to_degrees().rem_euclid(360.0),
+                params.turn_rate,
+            )
+        } else {
+            (self.yaw, params.turn_rate)
+        };
+        let delta = (target - self.yaw + 540.0).rem_euclid(360.0) - 180.0;
+        let max_turn = rate * dt;
+        self.yaw = (self.yaw + delta.clamp(-max_turn, max_turn)).rem_euclid(360.0);
         let speed = if mv.sprint {
             params.sprint_speed
         } else {
@@ -283,6 +300,34 @@ mod tests {
         );
         assert_eq!(c.position[2], 0.0, "and land back on the floor");
         assert!(c.grounded);
+    }
+
+    /// Aiming pins the facing to the aim yaw while the input still strafes, so the character faces
+    /// where it shoots rather than where it moves.
+    #[test]
+    fn aiming_pins_the_facing_to_the_aim_yaw_while_strafing() {
+        let p = MovementParams::default();
+        let mut c = Character::default();
+        c.step(
+            &p,
+            MoveIntent {
+                right: 1.0,
+                aim_yaw: Some(90.0),
+                ..MoveIntent::default()
+            },
+            0.0,
+            0.0,
+            0.1,
+        );
+        assert!(
+            (c.yaw - 90.0).abs() < 1e-9,
+            "aiming faces the aim yaw, got {}",
+            c.yaw
+        );
+        assert!(
+            c.position[0].hypot(c.position[1]) > 0.0,
+            "the character still strafes while aiming"
+        );
     }
 
     #[test]

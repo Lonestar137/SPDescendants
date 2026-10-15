@@ -110,22 +110,34 @@ pub struct WeaponAssets {
 /// Locomotion clips and how their tracks map onto the mesh's bones.
 pub struct Animation {
     pub clips: Vec<AnimClip>,
-    /// Index of the idle clip within `clips`.
-    pub idle: usize,
-    /// Index of the walk clip.
-    pub walk: usize,
-    /// Index of the run clip.
-    pub run: usize,
-    /// Index of the jump/takeoff clip.
-    pub jump: usize,
-    /// Index of the airborne loop clip.
-    pub air: usize,
-    /// Index of the landing clip.
-    pub land: usize,
-    /// Index of the aim-down-sights pose, layered over the upper body while aiming.
-    pub aim: usize,
     /// Per clip, for each mesh bone, the track that drives it (clips animate different track sets).
     pub bone_to_track: Vec<Vec<Option<usize>>>,
+    /// The unarmed locomotion set (`0LT`).
+    pub base: Locomotion,
+    /// The armed, two-handed locomotion set (`2LT`), used while carrying a weapon.
+    pub armed: Option<Locomotion>,
+    /// The aim-down-sights pose, layered over the upper body while aiming.
+    pub aim: usize,
+    /// The reload pose's halves, layered while a weapon reloads.
+    pub reload: Option<Reload>,
+}
+
+/// The clips a locomotion set provides: on the ground, in the air, and on touchdown.
+#[derive(Clone, Copy)]
+pub struct Locomotion {
+    pub idle: usize,
+    pub walk: usize,
+    pub run: usize,
+    pub jump: usize,
+    pub air: usize,
+    pub land: usize,
+}
+
+/// A reload's two halves: the upper body works the weapon while the lower body shifts.
+#[derive(Clone, Copy)]
+pub struct Reload {
+    pub upper: usize,
+    pub lower: usize,
 }
 
 /// A skeleton's bind pose, converted to Bevy space: bone names and parents in order, each bone's
@@ -782,7 +794,7 @@ pub const WEAPON_MESH_PATH: &str =
 /// The folder holding that weapon's texture maps.
 pub const WEAPON_MATERIAL_DIR: &str = "/M1/Content/Characters/Weapon/RW/AR/1001/Material";
 /// The body bone a weapon sockets onto (falling back to the right hand itself).
-const WEAPON_SOCKET: &str = "RHandWeaponSocket";
+pub const WEAPON_SOCKET: &str = "RHandWeaponSocket";
 
 /// Load the equipped weapon: its static sub-meshes, their materials, and its socket on the hand.
 /// The weapon mesh is authored in its own frame (`+X` along the barrel), so it rides the hand
@@ -950,27 +962,79 @@ fn build_parts(
 
 /// Best-effort load of the locomotion clips and the track↔bone mapping. Any failure yields `None`
 /// and the character is presented in its bind pose.
+/// Decode one clip, append it (and its bone↔track map) to the running lists, and return its index.
+fn load_clip(
+    data: &mut DataSource,
+    skeleton: &Skeleton,
+    order: &[String],
+    path: &str,
+    clips: &mut Vec<AnimClip>,
+    bone_to_track: &mut Vec<Vec<Option<usize>>>,
+) -> Option<usize> {
+    let clip = data.clip(path).ok()?;
+    let num_tracks = clip.num_tracks as usize;
+    let map = data.track_map(path, num_tracks).ok()?;
+    bone_to_track.push(crate::content::bone_to_track(
+        skeleton, order, &map, num_tracks,
+    ));
+    clips.push(clip);
+    Some(clips.len() - 1)
+}
+
 fn load_animation(data: &mut DataSource, skeleton: &Skeleton) -> Option<Animation> {
     let order = data.skeleton_order().ok()?;
-    let mut load = |path: &str| -> Option<(AnimClip, Vec<Option<usize>>)> {
-        let clip = data.clip(path).ok()?;
-        let num_tracks = clip.num_tracks as usize;
-        let map = data.track_map(path, num_tracks).ok()?;
-        let bone_to_track = bone_to_track(skeleton, &order, &map, num_tracks);
-        Some((clip, bone_to_track))
+    let mut clips: Vec<AnimClip> = Vec::new();
+    let mut bone_to_track: Vec<Vec<Option<usize>>> = Vec::new();
+    // The unarmed set every character ships. The idle is required; the rest fall back to it.
+    let idle = load_clip(
+        data,
+        skeleton,
+        &order,
+        IDLE_CLIP_PATH,
+        &mut clips,
+        &mut bone_to_track,
+    )?;
+    let mut set =
+        |path: &str| load_clip(data, skeleton, &order, path, &mut clips, &mut bone_to_track);
+    let walk = set(WALK_CLIP_PATH).unwrap_or(idle);
+    let run = set(RUN_CLIP_PATH).unwrap_or(idle);
+    let jump = set(JUMP_CLIP_PATH).unwrap_or(idle);
+    let air = set(AIR_CLIP_PATH).unwrap_or(idle);
+    let land = set(LAND_CLIP_PATH).unwrap_or(idle);
+    let base = Locomotion {
+        idle,
+        walk,
+        run,
+        jump,
+        air,
+        land,
     };
-    let (idle, idle_map) = load(IDLE_CLIP_PATH)?;
-    let (walk, walk_map) = load(WALK_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
-    let (run, run_map) = load(RUN_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
-    let (jump, jump_map) = load(JUMP_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
-    let (air, air_map) = load(AIR_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
-    let (land, land_map) = load(LAND_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
-    // The aim-down-sights pose: the equipped AR held to the eye. It is layered over the lower body.
-    let (aim, aim_map) = load(AIM_CLIP_PATH).unwrap_or_else(|| (idle.clone(), idle_map.clone()));
-    let clips = vec![idle, walk, run, jump, air, land, aim];
-    let bone_to_track = vec![
-        idle_map, walk_map, run_map, jump_map, air_map, land_map, aim_map,
-    ];
+    // The aim-down-sights pose: the equipped AR held to the eye, layered over the lower body.
+    let aim = set(AIM_CLIP_PATH).unwrap_or(idle);
+    // The armed, two-handed stance, and the weapon's reload halves. Both are weapon-specific, so
+    // they are optional: without them the character keeps the unarmed set and no reload pose.
+    let armed = match ARMED_CLIP_PATHS.map(&mut set) {
+        [
+            Some(idle),
+            Some(walk),
+            Some(run),
+            Some(jump),
+            Some(air),
+            Some(land),
+        ] => Some(Locomotion {
+            idle,
+            walk,
+            run,
+            jump,
+            air,
+            land,
+        }),
+        _ => None,
+    };
+    let reload = match RELOAD_CLIP_PATHS.map(&mut set) {
+        [Some(upper), Some(lower)] => Some(Reload { upper, lower }),
+        _ => None,
+    };
     info!(
         "animation: {} clips, {} bones driven of {} (skeleton has {} bones)",
         clips.len(),
@@ -980,14 +1044,11 @@ fn load_animation(data: &mut DataSource, skeleton: &Skeleton) -> Option<Animatio
     );
     Some(Animation {
         clips,
-        idle: 0,
-        walk: 1,
-        run: 2,
-        jump: 3,
-        air: 4,
-        land: 5,
-        aim: 6,
         bone_to_track,
+        base,
+        armed,
+        aim,
+        reload,
     })
 }
 /// The body skeleton in Bevy space: bone names and parents in order, each bone's local bind
@@ -1045,6 +1106,21 @@ pub const LAND_CLIP_PATH: &str =
 /// The aim-down-sights hold for the equipped AR: the weapon-specific "ranged loop".
 pub const AIM_CLIP_PATH: &str =
     "/M1/Content/Characters/PC/Anim/F/RW/Sequence/AR/1001F_2LT_AR_1001_Ranged_Loop.uasset";
+/// The armed (two-handed, `2LT`) locomotion set: the stance the character holds while carrying a
+/// weapon. (The 600 sample's `move` is lower-case in the shipped name.)
+pub const ARMED_CLIP_PATHS: [&str; 6] = [
+    "/M1/Content/Characters/PC/Anim/F/CMN/Sequence/IdleF_2LT_Idle.uasset",
+    "/M1/Content/Characters/PC/Anim/F/CMN/Sequence/MoveF_2LT_move_600_F.uasset",
+    "/M1/Content/Characters/PC/Anim/F/CMN/Sequence/MoveF_2LT_Move_1200_F.uasset",
+    "/M1/Content/Characters/PC/Anim/F/CMN/Sequence/JumpF_2LT_JumpStart.uasset",
+    "/M1/Content/Characters/PC/Anim/F/CMN/Sequence/JumpF_2LT_JumpLoop.uasset",
+    "/M1/Content/Characters/PC/Anim/F/CMN/Sequence/JumpF_2LT_JumpLandHard.uasset",
+];
+/// The equipped AR's reload: the upper body works the weapon while the lower body shifts.
+pub const RELOAD_CLIP_PATHS: [&str; 2] = [
+    "/M1/Content/Characters/PC/Anim/F/RW/Sequence/AR/1001F_2LT_AR_1001_Reload_Upper.uasset",
+    "/M1/Content/Characters/PC/Anim/F/RW/Sequence/AR/1001F_2LT_AR_1001_Reload_Lower.uasset",
+];
 
 impl DataSource {
     /// The ordered reference-skeleton bone names of the character skeleton (~4930 bones). An
@@ -1258,10 +1334,10 @@ mod tests {
             return;
         };
         let animation = assets.animation.as_ref().expect("the idle clip loads");
-        let map = &animation.bone_to_track[animation.idle];
+        let map = &animation.bone_to_track[animation.base.idle];
         let driven = map.iter().filter(|t| t.is_some()).count();
         assert!(driven > 100, "only {driven} bones are driven by the clip");
-        let clip = &animation.clips[animation.idle];
+        let clip = &animation.clips[animation.base.idle];
         let a = pose_bone_locals(&assets.skeleton, clip, map, 0);
         let b = pose_bone_locals(&assets.skeleton, clip, map, clip.num_samples as usize / 2);
         let moved = a
@@ -1285,10 +1361,14 @@ mod tests {
             return;
         };
         let a = assets.animation.as_ref().expect("the clips load");
-        assert_eq!(a.clips.len(), 7, "six locomotion clips plus the aim pose");
-        assert_eq!(a.clips[a.jump].num_samples, 31, "JumpStart");
-        assert_eq!(a.clips[a.air].num_samples, 61, "JumpLoop");
-        assert_eq!(a.clips[a.land].num_samples, 44, "JumpLandHard");
+        assert_eq!(
+            a.clips.len(),
+            15,
+            "six unarmed, the aim pose, six armed and the reload's two halves"
+        );
+        assert_eq!(a.clips[a.base.jump].num_samples, 31, "JumpStart");
+        assert_eq!(a.clips[a.base.air].num_samples, 61, "JumpLoop");
+        assert_eq!(a.clips[a.base.land].num_samples, 44, "JumpLandHard");
         assert!(
             a.clips[a.aim].num_samples > 1,
             "the weapon-specific ranged loop is the aim pose, not a one-frame stand-in"

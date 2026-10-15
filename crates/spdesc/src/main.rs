@@ -613,17 +613,20 @@ fn spawn_model(
     }
 
     if let Some(animation) = animation {
+        let start = animation.armed.unwrap_or(animation.base).idle;
         commands.entity(player).insert(Animator {
             clips: animation.clips,
-            idle: animation.idle,
-            walk: animation.walk,
-            run: animation.run,
-            jump: animation.jump,
-            air: animation.air,
-            land: animation.land,
-            aim: animation.aim,
             bone_to_track: animation.bone_to_track,
+            base: animation.base,
+            armed: animation.armed,
+            aim: animation.aim,
+            reload: animation.reload,
             upper: player::upper_body_mask(&skeleton),
+            upper_root: player::upper_body_root(&skeleton),
+            weapon_socket: skeleton
+                .names
+                .iter()
+                .position(|name| name == content::WEAPON_SOCKET),
             ads: 0.0,
             aim_time: 0.0,
             bones: bones.clone(),
@@ -632,10 +635,10 @@ fn spawn_model(
             air_timer: 0.0,
             land_timer: 0.0,
             was_grounded: true,
-            active: animation.idle,
+            active: start,
             active_at: 0.0,
             active_looping: true,
-            prev: animation.idle,
+            prev: start,
             prev_at: 0.0,
             prev_looping: true,
             blend: 1.0,
