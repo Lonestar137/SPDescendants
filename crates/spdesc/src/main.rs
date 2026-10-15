@@ -9,6 +9,7 @@ mod audio;
 mod catalog;
 mod combat;
 mod content;
+mod devmenu;
 mod hair;
 mod player;
 mod progress;
@@ -22,7 +23,12 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 
-use progress::{award_experience, debug_progress, draw_progress, setup_progress};
+use devmenu::{apply_volumes, dev_menu_input, draw_dev_menu, setup_dev_menu};
+use progress::{
+    award_experience, debug_progress, draw_progress, save_career, save_career_on_exit,
+    setup_progress,
+};
+use settings::{CareerSave, Settings};
 use spdesc_mw2::SoundBank;
 
 use audio::Sounds;
@@ -54,6 +60,9 @@ fn main() {
             ..default()
         })
         .insert_resource(ClearColor(Color::srgb(0.46, 0.55, 0.68)))
+        // The dev menu's open flag is read by a run condition, which runs before any startup
+        // system does: it has to exist from the first frame.
+        .init_resource::<devmenu::DevMenu>()
         .add_systems(
             Startup,
             (
@@ -61,6 +70,8 @@ fn main() {
                 grab_cursor,
                 setup_hud,
                 setup_progress,
+                setup_dev_menu,
+                setup_settings,
                 setup_mw2,
                 setup_character,
             ),
@@ -75,6 +86,11 @@ fn main() {
                 draw_progress,
                 award_experience,
                 debug_progress,
+                dev_menu_input,
+                draw_dev_menu,
+                apply_volumes,
+                save_career,
+                save_career_on_exit,
                 (
                     toggle_cursor,
                     drive_player,
@@ -138,8 +154,23 @@ fn setup_mw2(
         None => info!("sound data: no MW2_DATA folder found — using the synthesised cues"),
     }
 
-    let career =
+    let mut career =
         progress::Career::from_zones(bank.as_ref().map(|bank| bank.zones()).unwrap_or(&[]));
+    // A saved career is taken up before anything reads it, so the HUD and the dev menu show the
+    // level the player left.
+    let saved = CareerSave::load();
+    career.restore(saved);
+    if let Some(saved) = saved
+        && career.is_loaded()
+    {
+        info!(
+            "progression: resumed at level {} (rank {}), prestige {}, {} xp in rank",
+            career.rank().map(|r| r.index + 1).unwrap_or(0),
+            career.rank().map(|r| r.title.clone()).unwrap_or_default(),
+            career.progression().prestige(),
+            saved.xp_in_rank,
+        );
+    }
     if career.is_loaded() {
         let ranks = career.ranks();
         info!(
@@ -156,6 +187,17 @@ fn setup_mw2(
     commands.insert_resource(Sounds::load(&mut sources, bank.as_ref()));
     commands.insert_resource(career);
     commands.insert_resource(insignia);
+}
+
+/// Load the sound levels and report them, so a run says which ones it is using.
+fn setup_settings(mut commands: Commands) {
+    let settings = Settings::load();
+    info!(
+        "settings: master {:.0}%, gun fire {:.0}%",
+        settings.master * 100.0,
+        settings.gun_fire * 100.0
+    );
+    commands.insert_resource(settings);
 }
 
 /// Camera, light, and the flat ground the MVP plays on. The ground is a tiled checker and there
@@ -453,11 +495,12 @@ fn setup_hud(mut commands: Commands) {
 /// Draw the HUD: the crosshair over the aim, and the magazine and reload countdown.
 fn draw_hud(
     menu: Res<Menu>,
+    dev: Res<devmenu::DevMenu>,
     weapons: Query<&Weapon>,
     mut texts: Query<&mut Text, With<HudText>>,
     mut reticles: Query<&mut Visibility, With<Reticle>>,
 ) {
-    let visibility = if menu.open {
+    let visibility = if menu.open || dev.open {
         Visibility::Hidden
     } else {
         Visibility::Inherited
@@ -468,7 +511,7 @@ fn draw_hud(
     let Ok(mut text) = texts.single_mut() else {
         return;
     };
-    if menu.open {
+    if menu.open || dev.open {
         if !text.0.is_empty() {
             text.0.clear();
         }
@@ -490,9 +533,10 @@ fn draw_hud(
     }
 }
 
-/// Gameplay systems only run while the menu is closed.
-fn menu_closed(menu: Res<Menu>) -> bool {
-    !menu.open
+/// Gameplay systems only run while no menu is open: the character menu and the dev menu both hold
+/// the game and free the cursor.
+fn menu_closed(menu: Res<Menu>, dev: Res<devmenu::DevMenu>) -> bool {
+    !menu.open && !dev.open
 }
 
 /// Open the container and the local state.
@@ -857,7 +901,10 @@ fn spawn_model(
 }
 
 /// Set the cursor's grab state, so the pointer is free while the menu is open.
-fn set_cursor_grab(grabbed: bool, windows: &mut Query<&mut CursorOptions, With<PrimaryWindow>>) {
+pub(crate) fn set_cursor_grab(
+    grabbed: bool,
+    windows: &mut Query<&mut CursorOptions, With<PrimaryWindow>>,
+) {
     for mut options in windows {
         options.grab_mode = if grabbed {
             CursorGrabMode::Locked

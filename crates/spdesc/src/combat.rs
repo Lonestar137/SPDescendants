@@ -14,6 +14,12 @@ use spdesc_game_core::combat::{Combat, FireError, Shot, Target, WeaponParams};
 
 use crate::audio::{self, Sounds};
 use crate::progress::{self, Career};
+use crate::settings::Settings;
+
+/// The volume each cue plays at before the settings trim it, on Bevy's 0..=1 scale.
+const SHOT_VOLUME: f32 = 0.5;
+const DRY_VOLUME: f32 = 0.6;
+const HIT_VOLUME: f32 = 0.55;
 
 /// Seconds a downed target stays down before it pops back up.
 const RESPAWN_SECONDS: f32 = 4.0;
@@ -138,6 +144,7 @@ pub fn fire_weapon(
     muzzles: Query<(Entity, &GlobalTransform), With<Muzzle>>,
     mut rigs: Query<&mut WeaponRig>,
     sounds: Res<Sounds>,
+    settings: Res<Settings>,
     mut career: ResMut<Career>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -197,9 +204,9 @@ pub fn fire_weapon(
                 }
                 let start = muzzle.map_or(origin_bevy, |(_, at)| at);
                 let hit = to_bevy(point);
-                audio::play(&mut commands, &sounds.shot, 0.5);
+                audio::play(&mut commands, &sounds.shot, settings.shot(SHOT_VOLUME));
                 // The hitmarker, whether or not the hit finished the target.
-                audio::play(&mut commands, &sounds.hit, 0.55);
+                audio::play(&mut commands, &sounds.hit, settings.cue(HIT_VOLUME));
                 spawn_tracer(&mut commands, &mut meshes, &mut materials, start, hit);
                 spawn_impact(&mut commands, &mut meshes, &mut materials, hit);
                 if let Some((entity, _)) = muzzle {
@@ -211,7 +218,7 @@ pub fn fire_weapon(
                 // The ray left the muzzle's neighbourhood; draw the miss tracer from the muzzle.
                 let start = muzzle.map_or(origin_bevy, |(_, at)| at);
                 let end = start + forward_bevy * MISS_TRACER_LENGTH;
-                audio::play(&mut commands, &sounds.shot, 0.5);
+                audio::play(&mut commands, &sounds.shot, settings.shot(SHOT_VOLUME));
                 spawn_tracer(&mut commands, &mut meshes, &mut materials, start, end);
                 if let Some((entity, _)) = muzzle {
                     spawn_flash(&mut commands, &mut meshes, &mut materials, entity);
@@ -219,7 +226,7 @@ pub fn fire_weapon(
                 kick(&mut rigs);
             }
             Err(FireError::Empty) => {
-                audio::play(&mut commands, &sounds.dry, 0.6);
+                audio::play(&mut commands, &sounds.dry, settings.shot(DRY_VOLUME));
                 begin_reload(&mut commands, &sounds, &mut weapon);
             }
             Err(_) => {}

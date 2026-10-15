@@ -54,8 +54,12 @@ hold left-click to fire, and `R` reloads.
 Each target pays experience — a hit is worth 10 and a kill 100 — against Modern Warfare 2's own
 rank table, so the bottom-left panel shows the level, the rank insignia, and how far the next rank
 is. Reaching one rings the game's promotion fanfare; the ten prestige insignia are read from the
-same install. `P` grants a chunk of experience and `O` takes the prestige on offer once the last
-rank is held, which is the quick way to walk the whole system.
+same install. **The level is kept between runs**, in `spdesc-config/career.json`.
+
+`F1` opens a developer menu over the game: the level and prestige it is acting on, a button to
+grant 25 000 experience, one to take the prestige on offer, one to reset the prestige, and sliders
+for the gun-fire and master volumes. The levels are kept too, in `spdesc-config/settings.json`. The
+menu also has the same two things on keys, `P` to grant experience and `O` to prestige.
 
 Character names come from `spdesc-config/roster.json` (a small id → name index, like the key and
 property mapping beside it); without it characters are labelled by their id.

@@ -157,7 +157,9 @@ cargo play
 `Tab` opens/closes the selection menu. Use left/right to choose the character, body-skin, head, or
 face column; use up/down to change the selection; press `Enter` to apply or `Escape` to close.
 Outside the menu, `WASD` or the arrow keys move, `Shift` sprints, `Space` jumps, the mouse orbits,
-right-click aims, hold left-click to fire, and `R` reloads.
+right-click aims, hold left-click to fire, and `R` reloads. `F1` opens the developer menu: the
+level and prestige, a button to reset the prestige, and sliders for the gun-fire and master
+volumes.
 
 Run the in-loop checks for a change, and the full gate chain before landing it:
 
@@ -175,6 +177,21 @@ TFD_DATA= MW2_DATA= cargo test --workspace
 Tests that need data files report a skip in this mode. With a folder resolved, `scripts/gates.sh`
 sets that root's switch — `SPDESC_REQUIRE_DATA` or `SPDESC_REQUIRE_MW2` — so a data test cannot
 silently skip the data that is actually installed.
+
+## What the game keeps
+
+Everything the game keeps between runs is a small JSON document under `$SPDESC_HOME`, written when
+it changes and not otherwise:
+
+| File | Holds |
+| --- | --- |
+| `selection.json` | the character, body skin, head and face last applied |
+| `settings.json` | the gun-fire and master volumes |
+| `career.json` | the level, the prestige, and the experience inside the rank |
+
+Each stands alone: a missing or malformed file means the default, never a half-read state, so
+deleting one is a safe way to start that part over. The career is the player's, not a character's,
+which is how the game's own progression works.
 
 ## Optional local character names
 

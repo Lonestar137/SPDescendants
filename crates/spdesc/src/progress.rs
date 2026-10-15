@@ -17,6 +17,7 @@ use spdesc_game_core::{Progression, Promotion, Rank, Ranks, XP_PER_HIT, XP_PER_K
 use spdesc_mw2::{ZoneData, iwd, iwi};
 
 use crate::audio::{self, Sounds};
+use crate::settings::CareerSave;
 
 /// How long a promotion banner stays up, seconds.
 const BANNER_SECONDS: f32 = 3.0;
@@ -56,6 +57,10 @@ pub struct Career {
     banner_text: String,
     /// Experience awarded since the last frame folded it in.
     pending: u32,
+    /// Whether the career has changed since it was last written, and how long until the next
+    /// write. A run can end abruptly, so this writes while playing rather than only on exit.
+    dirty: bool,
+    save_in: f32,
 }
 
 impl Default for Career {
@@ -66,9 +71,14 @@ impl Default for Career {
             banner: 0.0,
             banner_text: String::new(),
             pending: 0,
+            dirty: false,
+            save_in: 0.0,
         }
     }
 }
+
+/// How often the career is written while it is changing, seconds.
+const SAVE_EVERY: f32 = 2.0;
 
 impl Career {
     /// Build the career from the zones the app read.
@@ -77,6 +87,12 @@ impl Career {
             .iter()
             .find_map(|(_, zone)| ranks_from(zone))
             .unwrap_or_default();
+        Career::with_ranks(ranks)
+    }
+
+    /// A career on the given table, at its first rank — what [`from_zones`](Self::from_zones)
+    /// builds, and what a test can build from a table of its own.
+    pub fn with_ranks(ranks: Ranks) -> Career {
         Career {
             ranks,
             ..Career::default()
@@ -102,9 +118,43 @@ impl Career {
         !self.ranks.is_empty()
     }
 
+    /// Take up a saved career, if one is there and its rank exists in the loaded table.
+    pub fn restore(&mut self, save: Option<CareerSave>) {
+        let Some(save) = save else {
+            return;
+        };
+        let rank = save
+            .rank_index
+            .min(self.ranks.last_index().unwrap_or(0))
+            .min(self.ranks.len().saturating_sub(1) as u32);
+        let prestige = save.prestige.min(self.ranks.max_prestige());
+        self.progression.restore(rank, prestige, save.xp_in_rank);
+    }
+
+    /// The career as it is kept between runs.
+    pub fn save_data(&self) -> CareerSave {
+        CareerSave {
+            rank_index: self.progression.rank_index(),
+            prestige: self.progression.prestige(),
+            xp_in_rank: self.progression.xp_in_rank(),
+        }
+    }
+
+    /// Forget the prestige and the levels: a fresh career on the loaded table.
+    pub fn reset(&mut self) {
+        self.progression = Progression::new();
+        self.banner(BANNER_SECONDS, "PRESTIGE RESET".to_owned());
+        self.dirty = true;
+        self.save_in = 0.0;
+    }
+
     /// Award experience, reporting what it did.
     pub fn award(&mut self, xp: u32) -> Vec<Promotion> {
         let events = self.progression.award(&self.ranks, xp);
+        if !events.is_empty() {
+            self.dirty = true;
+            self.save_in = 0.0;
+        }
         for event in &events {
             match event {
                 Promotion::Rank { index } => {
@@ -133,7 +183,26 @@ impl Career {
         }
         let level = self.progression.prestige();
         self.banner(BANNER_SECONDS, format!("PRESTIGE {level}"));
+        self.dirty = true;
+        self.save_in = 0.0;
         true
+    }
+
+    /// Write the career if it has changed, at most every [`SAVE_EVERY`] seconds.
+    pub fn save_if_due(&mut self, dt: f32) {
+        if !self.dirty {
+            return;
+        }
+        self.save_in -= dt;
+        if self.save_in > 0.0 {
+            return;
+        }
+        self.save_in = SAVE_EVERY;
+        match self.save_data().save() {
+            Ok(()) => self.dirty = false,
+            // A failing write is not fatal — the career simply keeps trying.
+            Err(error) => warn!("career: could not write: {error}"),
+        }
     }
 
     fn banner(&mut self, seconds: f32, text: String) {
@@ -303,6 +372,26 @@ pub fn award_experience(mut commands: Commands, sounds: Res<Sounds>, mut career:
 /// Award experience to the career, which the gameplay systems call when a target is hit or killed.
 pub fn grant(career: &mut Career, xp: u32) {
     career.pending = career.pending.saturating_add(xp);
+}
+
+/// Keep the career on disk while it changes.
+pub fn save_career(time: Res<Time>, mut career: ResMut<Career>) {
+    career.save_if_due(time.delta_secs());
+}
+
+/// Write the career on the way out, so a clean exit keeps the level exactly.
+pub fn save_career_on_exit(
+    mut exits: MessageReader<AppExit>,
+    career: Res<Career>,
+    mut done: Local<bool>,
+) {
+    if *done || exits.read().next().is_none() {
+        return;
+    }
+    *done = true;
+    if let Err(error) = career.save_data().save() {
+        warn!("career: could not write on exit: {error}");
+    }
 }
 
 /// The experience a hit and a kill are worth, for the gameplay systems.
@@ -532,6 +621,98 @@ pub fn setup_progress(mut commands: Commands) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::CareerSave;
+
+    /// A small table in the game's shape: five ranks, two prestige levels.
+    fn table_career() -> Career {
+        Career::with_ranks(Ranks::new(
+            (0..5)
+                .map(|index| Rank {
+                    index,
+                    title: format!("r{index}"),
+                    xp_to_reach: index * 1_000,
+                    xp_in_rank: 1_000,
+                    icon: String::new(),
+                })
+                .collect(),
+            2,
+        ))
+    }
+
+    /// A career goes to disk and comes back: the level, the prestige and the experience inside the
+    /// rank all survive, which is what "the level persists" means.
+    #[test]
+    fn a_career_round_trips_through_its_saved_form() {
+        let mut career = table_career();
+        career.restore(Some(CareerSave {
+            rank_index: 4,
+            prestige: 2,
+            xp_in_rank: 7_00,
+        }));
+        let save = career.save_data();
+        assert_eq!(
+            save,
+            CareerSave {
+                rank_index: 4,
+                prestige: 2,
+                xp_in_rank: 700
+            }
+        );
+        let mut restored = table_career();
+        restored.restore(CareerSave::from_json(&save.to_json()));
+        assert_eq!(restored.save_data(), save);
+    }
+
+    /// A saved career cannot put the player somewhere the table cannot draw: a rank past the end
+    /// or a prestige past the ceiling is clamped, and an empty table holds everything at zero.
+    #[test]
+    fn a_career_cannot_restore_past_the_table() {
+        let mut career = table_career();
+        career.restore(Some(CareerSave {
+            rank_index: 999,
+            prestige: 999,
+            xp_in_rank: 10,
+        }));
+        assert_eq!(career.progression().rank_index(), 4, "the last rank");
+        assert_eq!(career.progression().prestige(), 2, "the ceiling");
+        assert_eq!(career.progression().xp_in_rank(), 10);
+
+        let mut empty = Career::default();
+        empty.restore(Some(CareerSave {
+            rank_index: 3,
+            prestige: 1,
+            xp_in_rank: 10,
+        }));
+        assert_eq!(
+            (
+                empty.progression().rank_index(),
+                empty.progression().prestige()
+            ),
+            (0, 0),
+            "with no table there is nowhere to stand"
+        );
+    }
+
+    /// Resetting, which the dev menu's button does, forgets the prestige and the levels.
+    #[test]
+    fn resetting_forgets_the_prestige_and_the_levels() {
+        let mut career = table_career();
+        career.restore(Some(CareerSave {
+            rank_index: 3,
+            prestige: 2,
+            xp_in_rank: 400,
+        }));
+        career.reset();
+        assert_eq!(
+            career.save_data(),
+            CareerSave {
+                rank_index: 0,
+                prestige: 0,
+                xp_in_rank: 0
+            }
+        );
+        assert_eq!(career.banner_text, "PRESTIGE RESET");
+    }
 
     /// The career reads the game's own rank table, and the experience the targets pay walks it:
     /// the thresholds, the rank names and the insignia come from the install rather than from a
