@@ -580,7 +580,9 @@ fn face_material(
     let (tint, roughness) = if s.contains("lash") || s.contains("brow") || s.contains("tear") {
         ([0.05, 0.04, 0.04, 1.0], 0.6)
     } else if s.contains("eye") || s.contains("occ") {
-        ([0.80, 0.80, 0.86, 1.0], 0.15)
+        // The iris colour is a material-instance parameter we cannot read, so a dark iris stands
+        // in; white eyeballs read as blank.
+        ([0.16, 0.13, 0.12, 1.0], 0.2)
     } else if s.contains("teeth") {
         ([0.90, 0.90, 0.88, 1.0], 0.3)
     } else {

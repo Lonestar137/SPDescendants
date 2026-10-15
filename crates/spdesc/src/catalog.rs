@@ -85,9 +85,26 @@ fn lookup<'a>(
     if let Some(dir) = material.get(key).and_then(|m| m.get(number)) {
         return Some(dir);
     }
+    // A set can own a folder directly (`U/CMN` → `U/CMN/Material/001`) or through a parent
+    // (`U/VAR` → `U/VAR/BODY/Material/000`).
+    let prefix = format!("{key}/");
+    if let Some(dir) = material
+        .iter()
+        .find(|(k, _)| k.starts_with(&prefix))
+        .and_then(|(_, m)| m.get(number))
+    {
+        return Some(dir);
+    }
     let (skel, set) = key.split_once('/')?;
     let other = format!("{}/{set}", if skel == "U" { "A" } else { "U" });
-    material.get(&other).and_then(|m| m.get(number))
+    if let Some(dir) = material.get(&other).and_then(|m| m.get(number)) {
+        return Some(dir);
+    }
+    let other_prefix = format!("{other}/");
+    material
+        .iter()
+        .find(|(k, _)| k.starts_with(&other_prefix))
+        .and_then(|(_, m)| m.get(number))
 }
 
 /// Enumerate every character that has skins, with `names` supplying display names by id.
@@ -116,6 +133,10 @@ pub fn build(index: &HashMap<String, u32>, names: &HashMap<String, String>) -> V
         let dir = parts[4..parts.len() - 1].join("/");
         let key = format!("{skel}/{dir}");
         let stem = parts[parts.len() - 1].trim_end_matches(".uasset");
+        // `BOS` is the boss set: its heads are rigged for bosses and float on a player body.
+        if dir == "BOS" || dir.starts_with("BOS/") {
+            continue;
+        }
 
         if let Some((base, number)) = dir.split_once("/Material/") {
             if number.contains('/') {
