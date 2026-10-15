@@ -1,8 +1,9 @@
 # METHOD — how SPDescendants is built
 
-SPDescendants is an offline, single-player game in Rust and Bevy. The player's own `GAME_DATA`
-folder is the reference for assets, formats, and presentation. The project owns its simulation
-rules and its content; there is no server and no network protocol on the game path.
+SPDescendants is an offline, single-player game in Rust and Bevy. The player's own `TFD_DATA`
+folder is the reference for assets, formats, and presentation; the optional `MW2_DATA` folder
+supplies the sound effects. The project owns its simulation rules and its content; there is no
+server and no network protocol on the game path.
 
 ## The rule for every change
 
@@ -11,12 +12,13 @@ asset and presentation behavior. State project-owned gameplay decisions explicit
 or content schema. Keep the data folder read-only and external, keep the executable offline, and
 run the appropriate gates.
 
-Unless otherwise stated, consult the folder named by `GAME_DATA` as a source of truth, to make
-sure a change matches the data it consumes.
+Unless otherwise stated, consult the data folder that governs the change — `TFD_DATA` for the
+game's own assets and formats, `MW2_DATA` for a sound — as a source of truth, to make sure a change
+matches the data it consumes.
 
 ## The loop
 
-1. **Establish the fact.** For data, formats, or presentation, read the file under `GAME_DATA` or
+1. **Establish the fact.** For data, formats, or presentation, read the file under `TFD_DATA` or
    observe the behavior it produces. For game rules and content, record a project-owned decision
    and its provenance.
 2. **Implement one slice.** Keep the game simulation (`spdesc-game-core`) independent of Bevy
@@ -32,7 +34,7 @@ sure a change matches the data it consumes.
 ## Compile-efficient rounds
 
 Treat a round as one cohesive, testable behavior slice, not one compile per edit. Before the
-first build, trace the behavior through its relevant layers, decide which file under `GAME_DATA`
+first build, trace the behavior through its relevant layers, decide which file under `TFD_DATA`
 (or which probe) establishes the fact, identify the production and test files, and decide which
 command will verify the whole slice. Then make the connected implementation and regression-test
 edits before compiling. Do not bundle unrelated behavior just to amortize a build.
@@ -57,36 +59,46 @@ edits before compiling. Do not bundle unrelated behavior just to amortize a buil
 
 - **Offline means no runtime transport or database.** The shipped executable must not open
   sockets, launch a server process, or require accounts, realms, or an external database.
-- **The data folder is read-only runtime input.** Resolve it through `GAME_DATA` via
-  `spdesc_game_core::game_data()` — the one resolver, never an ad-hoc path. Set and empty
-  (`GAME_DATA=`) means "no data" on purpose; unset falls back to the `GAME_DATA` link beside the
-  checkout in a dev build, and to `GAME_DATA`/`data` beside the binary in a shipped one. Never write into it.
-- **Nothing from the data folder is committed.** No assets, no extracted files, no code copied or
-  derived from its contents. It stays outside the repository by rule;
-  `scripts/data-guard.sh` fails the gates when a resolved `GAME_DATA` sits inside the checkout
-  and has tracked files, and `.gitignore` covers the default in-tree folder. Conversion tooling
-  may read data and emit a project-owned content pack; record the source, revision, license, and
-  conversion version with every imported set.
+- **A data folder is read-only runtime input.** Resolve each one through its own variable —
+  `TFD_DATA` via `spdesc_game_core::tfd_data()` and `MW2_DATA` via `spdesc_game_core::mw2_data()`,
+  the one resolver, never an ad-hoc path. Set and empty (`TFD_DATA=`) means "no data" on purpose;
+  unset falls back to the link of that name beside the checkout in a dev build, and to the
+  `TFD_DATA`/`data` folders beside the binary in a shipped one. Never write into either.
+- **Nothing from a data folder is committed.** No assets, no extracted files, no code copied or
+  derived from its contents. Both stay outside the repository by rule; `scripts/data-guard.sh`
+  fails the gates when a resolved data folder sits inside the checkout and has tracked files, and
+  `.gitignore` covers the default in-tree folders. Conversion tooling may read data and emit a
+  project-owned content pack; record the source, revision, license, and conversion version with
+  every imported set.
 - **Local state has one root.** Saves and settings live under `spdesc-config/`. Per-character
   saves use stable generated IDs, not display names. Nothing else in the tree writes local state.
 - **Simulation is deterministic.** `spdesc-game-core` owns game time and seeded randomness. Tests
   inject time and RNG state; gameplay does not depend on host wall-clock time.
 - **Presentation follows Bevy.** `spdesc` presents what the simulation decides; it owns no game
   rules. Presentation-specific detail (layout, effects, camera) is its own concern.
-- **Data-gated tests are honest.** A test that needs `GAME_DATA` uses `game_data_or_skip!()` and
-  reports its skip. Where data resolves, `SPDESC_REQUIRE_DATA=1` (set by `scripts/gates.sh`)
-  turns a skip into a failure. A test never silently depends on a developer's folder, a host
-  clock, or nondeterministic RNG.
-- **License reflects provenance.** Our code is MIT OR Apache-2.0; no assets or code from the
-  player's data folder are bundled.
+- **Data-gated tests are honest.** A test that needs a data folder uses `tfd_data_or_skip!()` or
+  `mw2_data_or_skip!()` and reports its skip. Where a folder resolves, that root's switch —
+  `SPDESC_REQUIRE_DATA` or `SPDESC_REQUIRE_MW2`, both set by `scripts/gates.sh` — turns a skip into
+  a failure, so a machine without the optional sound data still reports an honest skip rather than
+  a failure. A test never silently depends on a developer's folder, a host clock, or
+  nondeterministic RNG.
+- **License reflects provenance.** Our code is MIT OR Apache-2.0; no assets from a player's data
+  folder are bundled, and third-party source is carried with its licence and notice (see
+  `NOTICE.md`).
 
 ## Where things live
 
 - `docs/METHOD.md`: binding engineering and provenance rules; never a work log.
+- `docs/SETUP.md`: first-run instructions for local game data and configuration; never store a key
+  or mapping in the repository.
 - `docs/research/`: project-authored, provenance-safe evidence for accepted reader contracts;
-  cite inputs and validation, but never include `GAME_DATA` artifacts or local configuration.
+  cite inputs and validation, but never include `TFD_DATA` artifacts or local configuration.
 - `crates/`: Rust workspace. `spdesc-game-core` is the Bevy-free simulation (plus the data
-  resolver); `spdesc` is the Bevy app that presents it.
+  resolvers); `spdesc-data` reads `TFD_DATA`; `spdesc-mw2` reads `MW2_DATA`; `spdesc` is the Bevy
+  app that presents it.
+- `vendor/`: third-party source kept in the tree on purpose, with its licence and notice
+  (`NOTICE.md`). It is outside the workspace member list, so this repository's formatting and lint
+  gates do not reach it; `scripts/vendor-iw4.sh` refreshes it.
 - `scripts/`: gates and instruments (`check.sh` for a round, `gates.sh` at land).
 - `.cargo/config.toml`: the `cargo play` alias; `Cargo.toml`: workspace dependencies and the
   `dev` / `ship` / `play` profiles.

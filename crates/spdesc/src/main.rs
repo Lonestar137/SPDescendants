@@ -1,8 +1,8 @@
 //! `spdesc` — the SPDescendants client.
 //!
 //! Presentation only: the simulation lives in `spdesc-game-core` and is Bevy-free, and the asset
-//! formats live in `spdesc-data`. The app resolves the read-only `GAME_DATA` folder through
-//! `spdesc_game_core::game_data`, builds the Ultimate Bunny's meshes and textures from the
+//! formats live in `spdesc-data`. The app resolves the read-only `TFD_DATA` folder through
+//! `spdesc_game_core::tfd_data`, builds the Ultimate Bunny's meshes and textures from the
 //! player's install at startup, and presents a movable character on a flat ground plane.
 
 mod audio;
@@ -426,7 +426,7 @@ fn menu_closed(menu: Res<Menu>) -> bool {
 /// Open the container and the local state.
 fn open_data() -> anyhow::Result<DataSource> {
     let paks =
-        spdesc_data::paks_dir().ok_or_else(|| anyhow::anyhow!("no GAME_DATA folder found"))?;
+        spdesc_data::paks_dir().ok_or_else(|| anyhow::anyhow!("no TFD_DATA folder found"))?;
     let key = spdesc_data::key::aes_key()
         .ok_or_else(|| anyhow::anyhow!("no container key (spdesc-config/keys.json)"))?;
     let schema =

@@ -630,18 +630,18 @@ mod tests {
 
     fn load_texture(path: &str) -> Option<Texture> {
         let Some(paks) = crate::paks_dir() else {
-            spdesc_game_core::skipped("no game data found", &spdesc_game_core::candidates());
+            spdesc_game_core::TFD.skip("no TFD_DATA folder found");
             return None;
         };
         let Some(key) = crate::key::aes_key() else {
-            spdesc_game_core::skipped(
+            spdesc_game_core::TFD.skip_looked_in(
                 "no container key (spdesc-config/keys.json)",
                 &crate::key::config_root().into_iter().collect::<Vec<_>>(),
             );
             return None;
         };
         let Ok(schema) = crate::mapping::load() else {
-            spdesc_game_core::skipped(
+            spdesc_game_core::TFD.skip_looked_in(
                 "no property mapping (spdesc-config/mappings)",
                 &crate::mapping::mapping_path()
                     .into_iter()

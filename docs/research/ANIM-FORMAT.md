@@ -16,7 +16,7 @@ Track-to-bone mapping also reads the character skeleton at:
 - `M1/Content/Characters/PCPC_Skeleton.uasset`
 
 The packages, clip payloads, decoded transforms, local key, and mapping files
-remain outside Git. The tests cite the inputs through the normal `GAME_DATA`
+remain outside Git. The tests cite the inputs through the normal `TFD_DATA`
 resolver and contain only compact oracle values needed to catch reader drift.
 
 ## Codec identification and blob location

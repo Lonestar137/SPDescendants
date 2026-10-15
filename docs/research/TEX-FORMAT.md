@@ -7,7 +7,7 @@ specification.
 ## Scope and provenance
 
 `crates/spdesc-data/src/texture.rs` reads a cooked `UTexture2D` into mip-0
-RGBA. It was established from read-only observations of these `GAME_DATA`
+RGBA. It was established from read-only observations of these `TFD_DATA`
 inputs and is covered by data-gated tests in that module:
 
 - `M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_Body_C.uasset`

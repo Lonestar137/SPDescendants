@@ -381,11 +381,11 @@ mod tests {
     #[test]
     fn extracts_a_chunk_to_its_recorded_length() {
         let Some(paks) = crate::paks_dir() else {
-            spdesc_game_core::skipped("no game data found", &spdesc_game_core::candidates());
+            spdesc_game_core::TFD.skip("no TFD_DATA folder found");
             return;
         };
         let Some(key) = crate::key::aes_key() else {
-            spdesc_game_core::skipped(
+            spdesc_game_core::TFD.skip_looked_in(
                 "no container key (spdesc-config/keys.json)",
                 &crate::key::config_root().into_iter().collect::<Vec<_>>(),
             );
@@ -404,11 +404,11 @@ mod tests {
     #[test]
     fn directory_index_resolves_the_body_mesh_package() {
         let Some(paks) = crate::paks_dir() else {
-            spdesc_game_core::skipped("no game data found", &spdesc_game_core::candidates());
+            spdesc_game_core::TFD.skip("no TFD_DATA folder found");
             return;
         };
         let Some(key) = crate::key::aes_key() else {
-            spdesc_game_core::skipped(
+            spdesc_game_core::TFD.skip_looked_in(
                 "no container key (spdesc-config/keys.json)",
                 &crate::key::config_root().into_iter().collect::<Vec<_>>(),
             );

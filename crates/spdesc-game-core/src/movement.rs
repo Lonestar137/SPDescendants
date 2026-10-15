@@ -4,7 +4,7 @@
 //! This is the project-owned simulation of The First Descendant's `M1CharacterMovementComponent`
 //! at the fidelity budget the plan records: recorded tuning keeps its game units, discrete rules
 //! are exact, and timing is expressed per simulation step. The game's own movement tuning lives in
-//! the character Blueprint's component defaults under `GAME_DATA`; until that is extracted
+//! the character Blueprint's component defaults under `TFD_DATA`; until that is extracted
 //! ([`MovementParams::default`] documents the chosen local rule), the numbers here are a
 //! deliberate, single-player stand-in.
 //!

@@ -3,8 +3,9 @@
 #
 # fmt, clippy, data-guard, test, test-no-data. A failure prints the gate's log tail and exits
 # nonzero; a green run stamps the tree, which then re-greens without running. GATES_FORCE=1 runs
-# the chain anyway, GAME_DATA picks the data folder (set and empty: none) and TMPDIR holds the
-# scratch files; the script sets SPDESC_REQUIRE_DATA and SPDESC_SKIP_LOG for its test rungs.
+# the chain anyway, TFD_DATA and MW2_DATA pick the data folders (set and empty: none) and TMPDIR
+# holds the scratch files; the script sets SPDESC_REQUIRE_DATA / SPDESC_REQUIRE_MW2 and
+# SPDESC_SKIP_LOG for its test rungs.
 #
 #   scripts/gates.sh
 set -uo pipefail
@@ -20,9 +21,9 @@ echo "gating: $root"
 # ── Green-stamp memoization ──────────────────────────────────────────────────────────────────────
 # A green run stamps target/.gates-green with the working tree's hash (untracked files included,
 # through a throwaway index that leaves the real one alone), rustc's version, this script's hash
-# and the data folder path: the data-gated tests run only where the folder resolves, and the
-# folder is gitignored, so the hash misses it. The data folder is compared last: resolving it is
-# a `cargo run`.
+# and the data folder paths: the data-gated tests run only where a folder resolves, and the folders
+# are gitignored, so the hash misses them. The data folders are compared last: resolving them is a
+# `cargo run`.
 stamp="target/.gates-green"
 tree_key() {
     local tmpidx t
@@ -35,6 +36,10 @@ tree_key() {
         "$(shasum "$root/scripts/gates.sh" 2>/dev/null | cut -d' ' -f1)"
 }
 resolve_game_data() { cargo run -q -p spdesc-game-core --example where 2>/dev/null || true; }
+resolve_mw2_data() { cargo run -q -p spdesc-game-core --example where mw2 2>/dev/null || true; }
+# Both roots as one stamp field: a machine that gains or loses either folder must not reuse a
+# verdict taken without it, and the data folders are gitignored, so the tree hash misses them.
+data_roots() { printf '%s;%s' "$(resolve_game_data)" "$(resolve_mw2_data)"; }
 # A delta only under docs/ or in top-level *.md files keeps the stamped verdict, since no gate
 # reads those paths; a gate that starts to read one must narrow this pattern.
 docs_only_delta() { # $1 = stamped tree, $2 = current tree
@@ -51,7 +56,7 @@ if [ "${GATES_FORCE:-}" != "1" ] && [ -n "$key_start" ] && [ -f "$stamp" ]; then
     elif [ "${old_key#*|}" = "${key_start#*|}" ] && docs_only_delta "${old_key%%|*}" "${key_start%%|*}"; then
         memo="this tree differs from one that passed only under docs/ or in top-level *.md, which no gate reads"
     fi
-    if [ -n "$memo" ] && [ "${old##*|}" = "$(resolve_game_data)" ]; then
+    if [ -n "$memo" ] && [ "${old##*|}" = "$(data_roots)" ]; then
         echo "ALL GATES GREEN (memoized — $memo; GATES_FORCE=1 re-runs)"
         [ -d target ] && printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" \
             "$(git rev-parse --short HEAD 2>/dev/null || echo '-')" chain 0 memo >>target/.gates-timing 2>/dev/null
@@ -101,28 +106,40 @@ run() {
 run fmt cargo fmt --all -- --check
 run clippy cargo clippy --workspace --all-targets -- -D warnings
 
-# data-guard: nothing from the resolved GAME_DATA folder (nor the checkout's GAME_DATA link)
-# is tracked. Polishes commits, not installs: absent data passes.
+# data-guard: nothing from either resolved data folder (nor the checkout's dev links) is tracked.
+# Polishes commits, not installs: absent data passes.
 run data-guard scripts/data-guard.sh
 
-# test: where the data folder resolves, SPDESC_REQUIRE_DATA=1 refuses a data-gated test that
-# skips; without it a lost folder would read green. `$game_data` is resolved once, for the stamp
-# too.
+# test: where a data folder resolves, SPDESC_REQUIRE_DATA / SPDESC_REQUIRE_MW2 refuse a data-gated
+# test that skips; without them a lost folder would read green. Each resolves once, for the stamp
+# too. Each root has its own switch, so a machine with the game's data but no MW2 install still
+# reports an honest skip from the sound tests rather than a failure.
 game_data="$(resolve_game_data)"
+mw2_data="$(resolve_mw2_data)"
+roots="$(data_roots)"
+require_data=""
+require_mw2=""
 if [ -n "$game_data" ]; then
     require_data=1
 else
-    require_data=""
-    echo "gates: NOTE — no game data found here:" \
-         "data-gated tests skip silently on this machine"
+    echo "gates: NOTE — no TFD_DATA found here:" \
+         "tests gated on the game's data skip silently on this machine"
 fi
-run test env ${require_data:+SPDESC_REQUIRE_DATA=1} SPDESC_SKIP_LOG="$skips" cargo test --workspace
+if [ -n "$mw2_data" ]; then
+    require_mw2=1
+else
+    echo "gates: NOTE — no MW2_DATA found here:" \
+         "tests gated on the sound data skip silently on this machine"
+fi
+run test env ${require_data:+SPDESC_REQUIRE_DATA=1} ${require_mw2:+SPDESC_REQUIRE_MW2=1} \
+    SPDESC_SKIP_LOG="$skips" cargo test --workspace
 report_skips test
 
-# test-no-data: refuses a test that reads the data folder without `game_data_or_skip!()`.
-# `GAME_DATA=` (set, empty) is the resolver's "no data"; no build reads it, so the test binaries
+# test-no-data: refuses a test that reads a data folder without a skip guard. `TFD_DATA=` and
+# `MW2_DATA=` (set, empty) are the resolvers' "no data"; no build reads them, so the test binaries
 # are reused.
-run test-no-data env -u SPDESC_REQUIRE_DATA GAME_DATA= cargo test --workspace
+run test-no-data env -u SPDESC_REQUIRE_DATA -u SPDESC_REQUIRE_MW2 TFD_DATA= MW2_DATA= \
+    cargo test --workspace
 
 echo "ALL GATES GREEN ($((SECONDS - chain_t0)) s; per-gate seconds in $timing)"
 note_timing chain "$((SECONDS - chain_t0))" ok
@@ -131,7 +148,7 @@ note_timing chain "$((SECONDS - chain_t0))" ok
 # otherwise memoize a green for a tree the chain never saw.
 key_end="$(tree_key || true)"
 if [ -n "$key_end" ] && [ "$key_end" = "$key_start" ] && [ -d target ]; then
-    printf '%s|%s\n' "$key_end" "$game_data" > "$stamp" 2>/dev/null || true
+    printf '%s|%s\n' "$key_end" "$roots" > "$stamp" 2>/dev/null || true
 fi
 
 # The clean-run gate needs a window: named here, not run.

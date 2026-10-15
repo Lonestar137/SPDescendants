@@ -1,6 +1,6 @@
 [package]
 name = "spdesc-data"
-description = "Read GAME_DATA containers: IoStore TOC, Zen package summaries, and export maps"
+description = "Read TFD_DATA containers: IoStore TOC, Zen package summaries, and export maps"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

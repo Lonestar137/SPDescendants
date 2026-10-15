@@ -1,4 +1,4 @@
-//! Building Bevy assets from the player's read-only `GAME_DATA`.
+//! Building Bevy assets from the player's read-only `TFD_DATA`.
 //!
 //! The app owns no asset formats: `spdesc-data` parses the container, the Zen package, the
 //! `USkeletalMesh` render data, and the `UTexture2D` pixels. This module only converts those
@@ -1267,11 +1267,11 @@ mod tests {
     /// Build the character from this machine's data, if the folder, key, and mapping resolve.
     fn build_or_skip() -> Option<CharacterAssets> {
         let Some(paks) = spdesc_data::paks_dir() else {
-            spdesc_game_core::skipped("no game data found", &spdesc_game_core::candidates());
+            spdesc_game_core::TFD.skip("no TFD_DATA folder found");
             return None;
         };
         let Some(key) = spdesc_data::key::aes_key() else {
-            spdesc_game_core::skipped(
+            spdesc_game_core::TFD.skip_looked_in(
                 "no container key (spdesc-config/keys.json)",
                 &spdesc_data::key::config_root()
                     .into_iter()
@@ -1280,7 +1280,7 @@ mod tests {
             return None;
         };
         let Ok(schema) = spdesc_data::mapping::load() else {
-            spdesc_game_core::skipped(
+            spdesc_game_core::TFD.skip_looked_in(
                 "no property mapping (spdesc-config/mappings)",
                 &spdesc_data::mapping::mapping_path()
                     .into_iter()
@@ -1300,7 +1300,7 @@ mod tests {
     /// The app's content path builds the body and head meshes and decodes their textures from the
     /// player's folder. This is the data-gated proof that startup has real geometry, not fallback.
     #[test]
-    fn bunny_has_geometry_and_textures_from_game_data() {
+    fn bunny_has_geometry_and_textures_from_the_install() {
         let Some(assets) = build_or_skip() else {
             return;
         };

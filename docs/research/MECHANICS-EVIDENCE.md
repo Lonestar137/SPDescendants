@@ -7,7 +7,7 @@ what a shipped client names and what the offline game chooses to simulate.
 ## Scope and provenance
 
 The observations came from read-only metadata available in the target player's
-`GAME_DATA`, including `M1-Win64-Shipping.exe` string tables and the readable
+`TFD_DATA`, including `M1-Win64-Shipping.exe` string tables and the readable
 global IoStore name/script tables. No original runtime, server, account, or
 network flow was launched or required.
 

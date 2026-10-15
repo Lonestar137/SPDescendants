@@ -7,7 +7,7 @@ cooked Unreal mesh has this layout.
 ## Scope and provenance
 
 The data readers in `crates/spdesc-data/src/mesh.rs`, `skeletal.rs`, and
-`zen.rs` were established against these read-only `GAME_DATA` packages:
+`zen.rs` were established against these read-only `TFD_DATA` packages:
 
 - `M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/001PC_004_U_CMN_BODY_001.uasset`
 - `M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/001PC_004_U_CMN_HEAD_001.uasset`
@@ -87,7 +87,7 @@ This evidence does not validate cloth, morph targets, adjacency data, ray
 tracing data, all skin-weight profiles, or arbitrary mesh packages. The head
 range anomaly is a known special case, not an engine-wide fact.
 
-When adding support for a new mesh form, cite its `GAME_DATA` package, retain
+When adding support for a new mesh form, cite its `TFD_DATA` package, retain
 strict bounds and full-consumption checks, and add a data-gated test before
 making it a fallback for existing inputs. Do not add the package, extracted
 geometry, or an external tool's exported result to the repository.

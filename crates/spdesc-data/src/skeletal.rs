@@ -380,18 +380,18 @@ mod tests {
     #[test]
     fn body_property_block_ends_on_the_native_tail() {
         let Some(paks) = crate::paks_dir() else {
-            spdesc_game_core::skipped("no game data found", &spdesc_game_core::candidates());
+            spdesc_game_core::TFD.skip("no TFD_DATA folder found");
             return;
         };
         let Some(key) = crate::key::aes_key() else {
-            spdesc_game_core::skipped(
+            spdesc_game_core::TFD.skip_looked_in(
                 "no container key (spdesc-config/keys.json)",
                 &crate::key::config_root().into_iter().collect::<Vec<_>>(),
             );
             return;
         };
         let Ok(schema) = crate::mapping::load() else {
-            spdesc_game_core::skipped(
+            spdesc_game_core::TFD.skip_looked_in(
                 "no property mapping (spdesc-config/mappings)",
                 &crate::mapping::mapping_path()
                     .into_iter()
@@ -440,11 +440,11 @@ mod tests {
     fn skeleton_asset_exposes_its_reference_bone_order() {
         const SKELETON: &str = "/M1/Content/Characters/PCPC_Skeleton.uasset";
         let Some(paks) = crate::paks_dir() else {
-            spdesc_game_core::skipped("no game data found", &spdesc_game_core::candidates());
+            spdesc_game_core::TFD.skip("no TFD_DATA folder found");
             return;
         };
         let Some(key) = crate::key::aes_key() else {
-            spdesc_game_core::skipped(
+            spdesc_game_core::TFD.skip_looked_in(
                 "no container key (spdesc-config/keys.json)",
                 &crate::key::config_root().into_iter().collect::<Vec<_>>(),
             );

@@ -4,14 +4,18 @@
 # Cargo.lock IS committed (this workspace produces binaries).
 
 # --- Game data: NEVER commit ---
-# The `GAME_DATA` folder: read-only runtime input, resolved through the `GAME_DATA` env var
-# (docs/METHOD.md, "The data folder is read-only runtime input"). Its assets, and any code
-# derived from it, live outside this repository by rule. `/GAME_DATA` is the dev link beside the
-# checkout (a symlink to the real install, or an in-tree copy) — machine-local like the link,
-# never committed; `scripts/data-guard.sh` fails the gates when anything under a resolved
-# `GAME_DATA` is tracked.
-/GAME_DATA
-/GAME_DATA/
+# Both data folders (docs/METHOD.md, "The data folder is read-only runtime input"): `TFD_DATA`,
+# The First Descendant, which supplies the game's own meshes, textures and animation, and
+# `MW2_DATA`, Call of Duty: Modern Warfare 2 (2009), which supplies the sound effects. Each is
+# read-only runtime input, resolved through the environment variable of its name; their contents,
+# and any code derived from them, live outside this repository by rule. `/TFD_DATA` and
+# `/MW2_DATA` are the dev links beside the checkout (symlinks to the real installs, or in-tree
+# copies) — machine-local like the links, never committed; `scripts/data-guard.sh` fails the gates
+# when anything under a resolved folder is tracked.
+/TFD_DATA
+/TFD_DATA/
+/MW2_DATA
+/MW2_DATA/
 
 # Real data files used as test fixtures (document expected paths, do not commit).
 **/tests/fixtures/

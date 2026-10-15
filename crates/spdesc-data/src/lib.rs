@@ -1,9 +1,9 @@
-//! Reading the player's read-only `GAME_DATA` folder: the IoStore container and the Zen package
+//! Reading the player's read-only `TFD_DATA` folder: the IoStore container and the Zen package
 //! summaries inside it.
 //!
 //! This crate owns the *what the files say* layer — container tables, decompression, package
 //! structure — and nothing about the simulation or about presentation. It reads the folder
-//! resolved by [`spdesc_game_core::game_data`] and never writes into it; nothing it returns is
+//! resolved by [`spdesc_game_core::tfd_data`] and never writes into it; nothing it returns is
 //! committed (`docs/METHOD.md`).
 //!
 //! Three stages, each independently testable:
@@ -28,9 +28,9 @@ pub mod zen;
 
 use std::path::PathBuf;
 
-/// The `*.utoc`/`*.ucas` pair beside each other under `<GAME_DATA>/M1/Content/Paks`, when the
+/// The `*.utoc`/`*.ucas` pair beside each other under `<TFD_DATA>/M1/Content/Paks`, when the
 /// folder resolves.
 pub fn paks_dir() -> Option<PathBuf> {
-    let dir = spdesc_game_core::game_data()?.join("M1/Content/Paks");
+    let dir = spdesc_game_core::tfd_data()?.join("M1/Content/Paks");
     dir.join("M1-Windows.utoc").is_file().then_some(dir)
 }
