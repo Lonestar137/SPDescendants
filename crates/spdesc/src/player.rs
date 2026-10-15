@@ -331,7 +331,9 @@ pub fn animate_locomotion(
             }
         }
 
-        // A reload overrides both halves: the upper body works the weapon, the lower body shifts.
+        // A reload takes the upper body. The lower body only takes the reload's own stance while
+        // standing: the game plays the reload *over* the locomotion, so walking and running keep
+        // their leg cycle and only the hands work the weapon.
         // The weapon owns the timer, so the pose tracks the reload rather than restarting it.
         let reload_left = weapon.map_or(0.0, |weapon| weapon.combat.reload_remaining as f32);
         if let Some(reload) = animator.reload
@@ -339,7 +341,11 @@ pub fn animate_locomotion(
         {
             let total = clip_duration(&animator.clips[reload.upper]);
             let at = (total - reload_left).max(0.0);
+            let standing = speed <= 20.0;
             for (index, upper) in [(reload.upper, true), (reload.lower, false)] {
+                if !upper && !standing {
+                    continue;
+                }
                 let clip = &animator.clips[index];
                 let sample = sample_at(clip, at, false);
                 let posed = crate::content::pose_bone_locals(

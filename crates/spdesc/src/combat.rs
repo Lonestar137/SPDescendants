@@ -93,7 +93,7 @@ pub fn fire_weapon(
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&CursorOptions, With<PrimaryWindow>>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
-    muzzles: Query<&GlobalTransform, With<Muzzle>>,
+    muzzles: Query<(Entity, &GlobalTransform), With<Muzzle>>,
     mut rigs: Query<&mut WeaponRig>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -110,7 +110,10 @@ pub fn fire_weapon(
     let origin_bevy = camera.translation();
     let forward_bevy = camera.forward();
     // Shots present from the barrel's tip, not from the eye, so the tracer reads as the gun firing.
-    let muzzle = muzzles.single().map(GlobalTransform::translation).ok();
+    let muzzle = muzzles
+        .single()
+        .ok()
+        .map(|(entity, tf)| (entity, tf.translation()));
 
     for mut weapon in &mut weapons {
         if keys.just_pressed(KeyCode::KeyR) {
@@ -145,19 +148,23 @@ pub fn fire_weapon(
                     enemy.target.health = enemy.target.health.max(0.0);
                 }
                 let _ = killed;
-                let start = muzzle.unwrap_or(origin_bevy);
+                let start = muzzle.map_or(origin_bevy, |(_, at)| at);
                 let hit = to_bevy(point);
                 spawn_tracer(&mut commands, &mut meshes, &mut materials, start, hit);
                 spawn_impact(&mut commands, &mut meshes, &mut materials, hit);
-                spawn_flash(&mut commands, &mut meshes, &mut materials, start);
+                if let Some((entity, _)) = muzzle {
+                    spawn_flash(&mut commands, &mut meshes, &mut materials, entity);
+                }
                 kick(&mut rigs);
             }
             Ok(Shot::Miss { .. }) => {
                 // The ray left the muzzle's neighbourhood; draw the miss tracer from the muzzle.
-                let start = muzzle.unwrap_or(origin_bevy);
+                let start = muzzle.map_or(origin_bevy, |(_, at)| at);
                 let end = start + forward_bevy * MISS_TRACER_LENGTH;
                 spawn_tracer(&mut commands, &mut meshes, &mut materials, start, end);
-                spawn_flash(&mut commands, &mut meshes, &mut materials, start);
+                if let Some((entity, _)) = muzzle {
+                    spawn_flash(&mut commands, &mut meshes, &mut materials, entity);
+                }
                 kick(&mut rigs);
             }
             Err(FireError::Empty) => {
@@ -267,16 +274,17 @@ fn spawn_tracer(
     ));
 }
 
-/// A bright unlit flash at the muzzle, angled arbitrarily so it does not read as a flat card.
+/// A bright flash on the muzzle, stretched along the barrel. It hangs off the muzzle entity so it
+/// inherits the weapon's frame rather than lying flat across it.
 fn spawn_flash(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
-    at: Vec3,
+    muzzle: Entity,
 ) {
-    let mesh = meshes.add(Cuboid::new(0.16, 0.16, 0.16));
+    let mesh = meshes.add(Sphere::new(0.06));
     let material = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.85, 0.5),
+        base_color: Color::srgb(1.0, 0.9, 0.6),
         emissive: LinearRgba::new(9.0, 6.0, 2.0, 1.0),
         unlit: true,
         ..default()
@@ -284,10 +292,9 @@ fn spawn_flash(
     commands.spawn((
         Mesh3d(mesh),
         MeshMaterial3d(material),
-        Transform::from_translation(at)
-            .with_rotation(Quat::from_rotation_x(0.6))
-            .with_scale(Vec3::new(1.0, 1.0, 0.4)),
+        Transform::from_scale(Vec3::new(1.9, 0.8, 0.8)),
         Flash { ttl: FLASH_TTL },
+        ChildOf(muzzle),
     ));
 }
 
