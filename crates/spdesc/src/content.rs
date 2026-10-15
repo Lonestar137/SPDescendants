@@ -33,8 +33,19 @@ pub struct Part {
     pub material: usize,
     /// Whether the section is skinned to the body skeleton.
     pub skinned: bool,
-    /// Whether the section hangs off the head attach node (the head) rather than the player.
-    pub under_head: bool,
+    /// Which frame the section follows (body, head, or the separate face mesh).
+    pub attach: Attach,
+}
+
+/// Where a [`Part`] hangs in the character hierarchy.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Attach {
+    /// A skinned sub-mesh of the model root (the body).
+    Body,
+    /// A sub-mesh of the head attach node (the head and hair).
+    Head,
+    /// A static sub-mesh of the face attach node (the separate face mesh).
+    Face,
 }
 
 /// The PBR maps and scalars for one material slot. `base`/`normal`/`packed` are the decoded
@@ -63,6 +74,10 @@ pub struct CharacterAssets {
     /// bone. The head mesh is authored in model space, so the node's bind rotation cancels the
     /// bone's orientation; the head then follows the head bone's motion without twisting.
     pub head_attach: Option<(usize, Transform)>,
+    /// The face attach node: the head bone it follows and the transform that puts the face mesh
+    /// (authored in body model space) back where it was authored. `None` when the character has no
+    /// separate face mesh.
+    pub face_attach: Option<(usize, Transform)>,
     /// Vertical (Bevy `+Y`) offset, in metres, that puts the model's lowest point at zero.
     pub feet_offset: f32,
     /// Locomotion clips `[idle, walk, run]` and the bone↔track mapping, when the data resolves.
@@ -441,25 +456,29 @@ fn slot_keywords(slot: &str) -> &'static [&'static str] {
 /// Load a slot's base colour and its normal and packed siblings from `material_dir`. The base map is
 /// any `*_C.uasset` in the folder whose name contains one of `keywords`; the normal and packed maps
 /// are the same stem with `_N` / `_P` (BC5 normals and the game's R=AO/G=roughness/B=metallic pack).
-fn load_skin_maps(data: &mut DataSource, material_dir: &str, keywords: &[&str]) -> Maps {
+/// The base (`_C`) texture in `material_dir` whose name contains one of `keywords`, if any.
+fn find_base(
+    index: &HashMap<String, u32>,
+    material_dir: &str,
+    keywords: &[&str],
+) -> Option<String> {
     if keywords.is_empty() {
-        return Maps::default();
+        return None;
     }
-    let mut base: Option<String> = None;
-    for key in data.index.keys() {
+    for key in index.keys() {
         if !key.starts_with(material_dir) || !key.ends_with(".uasset") {
             continue;
         }
         let name = key.rsplit('/').next().unwrap_or(key).to_ascii_lowercase();
-        if !name.ends_with("_c.uasset") {
-            continue;
-        }
-        if keywords.iter().any(|k| name.contains(k)) {
-            base = Some(key.clone());
-            break;
+        if name.ends_with("_c.uasset") && keywords.iter().any(|k| name.contains(k)) {
+            return Some(key.clone());
         }
     }
-    let Some(base) = base else {
+    None
+}
+
+fn load_skin_maps(data: &mut DataSource, material_dir: &str, keywords: &[&str]) -> Maps {
+    let Some(base) = find_base(&data.index, material_dir, keywords) else {
         return Maps::default();
     };
     let stem = base.trim_end_matches(".uasset");
@@ -486,7 +505,7 @@ fn material_for(
 ) -> MaterialSpec {
     let keywords = slot_keywords(slot);
     if !keywords.is_empty() {
-        let key = keywords.join(",");
+        let key = format!("{material_dir}|{}", keywords.join(","));
         let maps = cache
             .entry(key)
             .or_insert_with(|| load_skin_maps(data, material_dir, keywords))
@@ -527,29 +546,97 @@ fn material_for(
     }
 }
 
-/// Load one skin: `body` and `head` mesh package paths and the `material_dir` its textures live in.
-/// Every section of every LOD 0 becomes a [`Part`]; `feet_offset` places the model on the floor.
+/// The material for a face-mesh slot. Only the face skin is decoded (from the makeup folder); the
+/// eyes, teeth and lash/brow cards are flat tints this MVP does not decode.
+fn face_material(
+    data: &mut DataSource,
+    makeup_dir: &str,
+    slot: &str,
+    cache: &mut HashMap<String, Maps>,
+) -> MaterialSpec {
+    let s = slot.to_ascii_lowercase();
+    let keywords: &[&str] = if s.contains("face") {
+        &["face", "makeup"]
+    } else {
+        &[]
+    };
+    if !keywords.is_empty() {
+        let key = format!("{makeup_dir}|{}", keywords.join(","));
+        let maps = cache
+            .entry(key)
+            .or_insert_with(|| load_skin_maps(data, makeup_dir, keywords))
+            .clone();
+        if maps.base.is_some() {
+            return MaterialSpec {
+                base: maps.base,
+                packed: maps.packed,
+                normal: maps.normal,
+                tint: [1.0, 1.0, 1.0, 1.0],
+                roughness: 0.7,
+                metallic: 0.0,
+            };
+        }
+    }
+    let (tint, roughness) = if s.contains("lash") || s.contains("brow") || s.contains("tear") {
+        ([0.05, 0.04, 0.04, 1.0], 0.6)
+    } else if s.contains("eye") || s.contains("occ") {
+        ([0.80, 0.80, 0.86, 1.0], 0.15)
+    } else if s.contains("teeth") {
+        ([0.90, 0.90, 0.88, 1.0], 0.3)
+    } else {
+        ([0.74, 0.57, 0.47, 1.0], 0.7)
+    };
+    MaterialSpec {
+        base: None,
+        packed: None,
+        normal: None,
+        tint,
+        roughness,
+        metallic: 0.0,
+    }
+}
+
+/// Load one skin: the body and head mesh package paths, the folder each one's textures live in, and
+/// an optional face (makeup) folder. Every section of every LOD 0 becomes a [`Part`]; `feet_offset`
+/// places the model on the floor.
 pub fn load_character(
     data: &mut DataSource,
     body_path: &str,
     head_path: &str,
-    material_dir: &str,
+    body_material_dir: &str,
+    head_material_dir: &str,
+    face_material_dir: Option<&str>,
 ) -> Result<CharacterAssets> {
     let body = data.mesh(body_path, "").context("body mesh")?;
     let head = data.mesh(head_path, "").context("head mesh")?;
-    let mut cache: HashMap<String, Maps> = HashMap::new();
-
     // The head mesh is authored in model space (its twintails reach 1.3 m below its origin), so it
     // cannot simply follow the head bone (whose bind orientation follows the neck and would twist
     // it). Instead an attach node on the head bone cancels that bind orientation, so the head sits
     // upright at the head and still rotates with the bone as it moves.
-    let head_attach = head_bone(&body).map(|index| {
-        let world = world_pose(&body, index).to_bevy_mat4();
+    let head_index = head_bone(&body);
+    let head_world = head_index.map(|i| world_pose(&body, i).to_bevy_mat4());
+    let head_attach = head_world.map(|world| {
         let upright = Mat4::from_translation(world.w_axis.truncate());
         let (scale, rotation, translation) =
             (world.inverse() * upright).to_scale_rotation_translation();
         (
-            index,
+            head_index.unwrap(),
+            Transform {
+                translation,
+                rotation,
+                scale,
+            },
+        )
+    });
+
+    // The face is a separate mesh authored in *body* model space (its vertices sit at head height),
+    // so an attach node carrying the inverse of the head bone's bind transform puts it back exactly
+    // where it was authored and keeps it following the head.
+    let face = face_mesh_path(body_path).and_then(|path| data.mesh(&path, "").ok());
+    let face_attach = head_world.map(|world| {
+        let (scale, rotation, translation) = world.inverse().to_scale_rotation_translation();
+        (
+            head_index.unwrap(),
             Transform {
                 translation,
                 rotation,
@@ -561,48 +648,51 @@ pub fn load_character(
     let mut materials: Vec<MaterialSpec> = Vec::new();
     let mut material_of_slot: HashMap<String, usize> = HashMap::new();
     let mut parts: Vec<Part> = Vec::new();
+    let mut cache: HashMap<String, Maps> = HashMap::new();
     let mut feet = f32::MAX;
+    let mut ignored_feet = f32::MAX;
 
     let skeleton = build_skeleton(&body);
-    // Every section is skinned now: the body to the body skeleton, the head to its own skeleton
-    // (which carries the braid bones the hair dynamics drive).
-    for (mesh, is_head) in [(&body, false), (&head, true)] {
-        let lod = mesh.lods.first().context("mesh has no LOD 0")?;
-        for section in &lod.sections {
-            if section.disabled {
-                continue;
-            }
-            let slot = mesh
-                .materials
-                .get(section.material_index.max(0) as usize)
-                .map(|m| m.slot_name.clone())
-                .unwrap_or_else(|| format!("slot{}", section.material_index));
-            let material = match material_of_slot.get(&slot) {
-                Some(i) => *i,
-                None => {
-                    let material_spec = material_for(data, material_dir, &slot, &mut cache);
-                    materials.push(material_spec);
-                    let i = materials.len() - 1;
-                    material_of_slot.insert(slot.clone(), i);
-                    i
-                }
-            };
-            // Only the body (in component space) sets the floor; the head's local space would
-            // skew it.
-            let mut ignored_feet = f32::MAX;
-            let feet_ref = if is_head {
-                &mut ignored_feet
-            } else {
-                &mut feet
-            };
-            parts.push(Part {
-                mesh: section_mesh(lod, section, true, feet_ref)
-                    .with_context(|| format!("building section for slot {slot}"))?,
-                material,
-                skinned: true,
-                under_head: is_head,
-            });
-        }
+    build_parts(
+        data,
+        &body,
+        Attach::Body,
+        body_material_dir,
+        true,
+        &mut feet,
+        &mut cache,
+        &mut materials,
+        &mut material_of_slot,
+        &mut parts,
+    )?;
+    build_parts(
+        data,
+        &head,
+        Attach::Head,
+        head_material_dir,
+        true,
+        &mut ignored_feet,
+        &mut cache,
+        &mut materials,
+        &mut material_of_slot,
+        &mut parts,
+    )?;
+    if let Some(face) = &face {
+        let dir = face_material_dir
+            .map(str::to_string)
+            .unwrap_or_else(|| default_face_material_dir(body_path));
+        build_parts(
+            data,
+            face,
+            Attach::Face,
+            &dir,
+            false,
+            &mut ignored_feet,
+            &mut cache,
+            &mut materials,
+            &mut material_of_slot,
+            &mut parts,
+        )?;
     }
     if parts.is_empty() {
         bail!("the character meshes have no renderable sections");
@@ -615,9 +705,75 @@ pub fn load_character(
         skeleton,
         head_skeleton: build_skeleton(&head),
         head_attach,
+        face_attach,
         feet_offset,
         animation,
     })
+}
+
+/// The separate face mesh for the character owning `body_path`.
+fn face_mesh_path(body_path: &str) -> Option<String> {
+    let root = body_path.split("/U/Skel/").next()?;
+    let id = root.rsplit('/').next()?;
+    Some(format!("{root}/A/Skel/FacePC_{id}_A_Face_000.uasset"))
+}
+
+/// The cosmetic (makeup) folder that holds a character's default face texture.
+fn default_face_material_dir(body_path: &str) -> String {
+    match body_path.split("/U/Skel/").next() {
+        Some(root) => format!("{root}/A/Skel/SKIN/Makeup/001"),
+        None => String::new(),
+    }
+}
+
+/// Build one mesh's renderable sections into `parts`, resolving each slot's material.
+#[allow(clippy::too_many_arguments)]
+fn build_parts(
+    data: &mut DataSource,
+    mesh: &SkeletalMesh,
+    attach: Attach,
+    material_dir: &str,
+    skinned: bool,
+    feet: &mut f32,
+    cache: &mut HashMap<String, Maps>,
+    materials: &mut Vec<MaterialSpec>,
+    material_of_slot: &mut HashMap<String, usize>,
+    parts: &mut Vec<Part>,
+) -> Result<()> {
+    let lod = mesh.lods.first().context("mesh has no LOD 0")?;
+    for section in &lod.sections {
+        if section.disabled {
+            continue;
+        }
+        let slot = mesh
+            .materials
+            .get(section.material_index.max(0) as usize)
+            .map(|m| m.slot_name.clone())
+            .unwrap_or_else(|| format!("slot{}", section.material_index));
+        let key = format!("{material_dir}|{slot}");
+        let material = match material_of_slot.get(&key) {
+            Some(i) => *i,
+            None => {
+                let spec = if attach == Attach::Face {
+                    face_material(data, material_dir, &slot, cache)
+                } else {
+                    material_for(data, material_dir, &slot, cache)
+                };
+                materials.push(spec);
+                let i = materials.len() - 1;
+                material_of_slot.insert(key, i);
+                i
+            }
+        };
+        parts.push(Part {
+            mesh: section_mesh(lod, section, skinned, feet)
+                .with_context(|| format!("building section for slot {slot}"))?,
+            material,
+            skinned,
+            attach,
+        });
+    }
+    Ok(())
 }
 
 /// Best-effort load of the locomotion clips and the track↔bone mapping. Any failure yields `None`
@@ -882,7 +1038,7 @@ mod tests {
         let head =
             "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/001PC_004_U_CMN_HEAD_001.uasset";
         let material = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/001";
-        Some(load_character(&mut data, body, head, material).expect("load a skin"))
+        Some(load_character(&mut data, body, head, material, material, None).expect("load a skin"))
     }
 
     /// The app's content path builds the body and head meshes and decodes their textures from the

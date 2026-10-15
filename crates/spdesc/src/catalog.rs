@@ -1,23 +1,33 @@
 //! The selectable characters and their skins, enumerated from the container index.
 //!
 //! A skin is a body mesh, its matching head mesh, and the `Material/<id>/` folder its textures live
-//! in, all found under a character's `U/Skel/SKIN/<set>/` tree. The skin data assets
-//! (`M1CustomizingCharacterSkinDataAsset`) would name these directly, but the local property
-//! mapping does not describe the struct the game ships, so this reads the convention the asset
-//! names already encode instead.
+//! in, all found under a character's `U/Skel/SKIN/<set>/` tree. A character also has independent
+//! **head** variants (hairstyles/helmets, `…/Skel/SKIN/<set>/…_HEAD_…`) and **face** (makeup)
+//! presets (`…/A/Skel/SKIN/Makeup/<preset>/`). The skin data assets would name these directly, but
+//! the local property mapping does not describe the struct the game ships, so this reads the
+//! convention the asset names already encode instead.
+//!
+//! Body skins are limited to the `U/Skel` tree: the `A/Skel` bodies name their material slots
+//! differently from their textures (`PartA`/`PartB` against `Body`/`Etc`/`Helmet`), so they cannot
+//! be mapped without the material instances. Heads and makeup come from both trees.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use serde_json::Value as Json;
 
 /// Where every character's meshes live.
 const MESH_ROOT: &str = "/M1/Content/Characters/PC/MESH/";
 
-/// One selectable character and its skins.
+/// One selectable character and everything that can be swapped on it.
 pub struct Character {
     pub id: String,
     pub name: String,
+    /// Body skins (each with its default head).
     pub skins: Vec<Skin>,
+    /// Independent head/hairstyle variants.
+    pub heads: Vec<Variant>,
+    /// Face (makeup) presets.
+    pub faces: Vec<Variant>,
 }
 
 /// A body + head skin and the folder its textures live in.
@@ -32,6 +42,18 @@ pub struct Skin {
     /// Folder holding the skin's `Texture*.uasset` files.
     pub material_dir: String,
 }
+
+/// A swappable variant. `mesh` is the head mesh to use, or `None` for a face (makeup) preset, which
+/// only changes the texture folder.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Variant {
+    pub label: String,
+    pub mesh: Option<String>,
+    pub material_dir: String,
+}
+
+/// Texture folders: char → `"{skel}/{set}"` → number → folder.
+type Materials = HashMap<String, HashMap<String, HashMap<String, String>>>;
 
 /// The trailing run of digits in a file stem (`001PC_…_BODY_001` and `BODYPC_…_VAR_BODY_000` both
 /// resolve to their skin number).
@@ -48,97 +70,113 @@ fn skin_number(stem: &str) -> Option<&str> {
     (start < end).then(|| &stem[start..end])
 }
 
+/// The folder name part of a `"{skel}/{set}"` key.
+fn set_name(key: &str) -> &str {
+    key.split_once('/').map(|(_, set)| set).unwrap_or(key)
+}
+
+/// The material folder for `key`/`number`, falling back to the same set under the other skeleton
+/// tree (`U/CMN` ↔ `A/CMN`).
+fn lookup<'a>(
+    material: &'a HashMap<String, HashMap<String, String>>,
+    key: &str,
+    number: &str,
+) -> Option<&'a String> {
+    if let Some(dir) = material.get(key).and_then(|m| m.get(number)) {
+        return Some(dir);
+    }
+    let (skel, set) = key.split_once('/')?;
+    let other = format!("{}/{set}", if skel == "U" { "A" } else { "U" });
+    material.get(&other).and_then(|m| m.get(number))
+}
+
 /// Enumerate every character that has skins, with `names` supplying display names by id.
 pub fn build(index: &HashMap<String, u32>, names: &HashMap<String, String>) -> Vec<Character> {
-    // char id -> set -> skin number -> body/head mesh
-    let mut bodies: HashMap<String, HashMap<String, HashMap<String, String>>> = HashMap::new();
-    let mut heads: HashMap<String, HashMap<String, HashMap<String, String>>> = HashMap::new();
-    // char id -> material set -> skin number -> folder
-    let mut material: HashMap<String, HashMap<String, HashMap<String, String>>> = HashMap::new();
+    let mut bodies: Materials = HashMap::new();
+    let mut heads: Materials = HashMap::new();
+    let mut material: Materials = HashMap::new();
+    // char -> head/variant meshes as (key, number, mesh)
+    let mut head_meshes: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
+    // char -> makeup folders
+    let mut faces: HashMap<String, BTreeSet<String>> = HashMap::new();
 
-    for key in index.keys() {
-        let Some(rest) = key.strip_prefix(MESH_ROOT) else {
+    for path in index.keys() {
+        let Some(rest) = path.strip_prefix(MESH_ROOT) else {
             continue;
         };
-        if !key.ends_with(".uasset") {
+        if !path.ends_with(".uasset") {
             continue;
         }
         let parts: Vec<&str> = rest.split('/').collect();
-        // {char}/U/Skel/SKIN/…
-        if parts.len() < 6 || parts[1] != "U" || parts[2] != "Skel" || parts[3] != "SKIN" {
+        if parts.len() < 6 || (parts[1] != "U" && parts[1] != "A") {
             continue;
         }
-        let (character, dir, stem) = (
-            parts[0],
-            parts[4..parts.len() - 1].join("/"),
-            parts[parts.len() - 1].trim_end_matches(".uasset"),
-        );
+        let character = parts[0];
+        let skel = parts[1];
+        let dir = parts[4..parts.len() - 1].join("/");
+        let key = format!("{skel}/{dir}");
+        let stem = parts[parts.len() - 1].trim_end_matches(".uasset");
 
-        if let Some((set, id)) = dir.split_once("/Material/") {
-            if id.contains('/') {
+        if let Some((base, number)) = dir.split_once("/Material/") {
+            if number.contains('/') {
                 continue;
             }
             material
                 .entry(character.to_string())
                 .or_default()
-                .entry(set.to_string())
+                .entry(format!("{skel}/{base}"))
                 .or_default()
-                .entry(id.to_string())
-                .or_insert_with(|| format!("{MESH_ROOT}{character}/U/Skel/SKIN/{dir}"));
+                .entry(number.to_string())
+                .or_insert_with(|| folder_of(path));
             continue;
         }
-        if stem.contains("ClothPhysics")
-            || stem.contains("_PoseAsset")
-            || stem.contains("_Clothing")
-        {
+        if let Some((_, preset)) = dir.split_once("Makeup/") {
+            if preset.contains('/') {
+                continue;
+            }
+            faces
+                .entry(character.to_string())
+                .or_default()
+                .insert(folder_of(path));
             continue;
         }
-        let Some(id) = skin_number(stem) else {
+        if is_auxiliary(stem) {
+            continue;
+        }
+        let Some(number) = skin_number(stem) else {
             continue;
         };
-        let target = if stem.contains("_BODY_") {
-            &mut bodies
+        if stem.contains("_BODY_") {
+            // The `A/Skel` bodies do not map to their textures; only `U/Skel` body skins ship.
+            if skel == "U" {
+                insert(&mut bodies, character, &key, number, path);
+            }
         } else if stem.contains("_HEAD_") {
-            &mut heads
-        } else {
-            continue;
-        };
-        target
-            .entry(character.to_string())
-            .or_default()
-            .entry(dir.to_string())
-            .or_default()
-            .entry(id.to_string())
-            .or_insert_with(|| key.clone());
+            insert(&mut heads, character, &key, number, path);
+            head_meshes.entry(character.to_string()).or_default().push((
+                key.clone(),
+                number.to_string(),
+                path.clone(),
+            ));
+        }
     }
 
     let mut characters: Vec<Character> = Vec::new();
     for (id, sets) in &bodies {
         let mut skins: Vec<Skin> = Vec::new();
-        for (set, by_id) in sets {
-            for (number, body) in by_id {
-                // The material folder is the one whose set matches this mesh's set and whose id is
-                // the skin number (`CMN` → `CMN/Material/001`, `VAR` → `VAR/BODY/Material/000`).
-                let Some(dir) = material.get(id).and_then(|sets| {
-                    sets.iter()
-                        .find(|(mset, by_id)| {
-                            (mset.as_str() == set.as_str() || mset.starts_with(&format!("{set}/")))
-                                && by_id.contains_key(number)
-                        })
-                        .and_then(|(_, by_id)| by_id.get(number))
-                }) else {
+        for (key, by_number) in sets {
+            for (number, body) in by_number {
+                let Some(dir) = material.get(id).and_then(|m| lookup(m, key, number)) else {
                     continue;
                 };
-                let Some(head) = heads
-                    .get(id)
-                    .and_then(|s| s.get(set))
-                    .and_then(|b| b.get(number))
-                    .cloned()
-                else {
+                let Some(head) = heads.get(id).and_then(|h| lookup(h, key, number)).cloned() else {
                     continue;
                 };
                 skins.push(Skin {
-                    label: format!("{set} {number}"),
+                    label: format!(
+                        "{} {number}",
+                        set_name(key).rsplit('/').next().unwrap_or(key)
+                    ),
                     body: body.clone(),
                     head,
                     material_dir: dir.clone(),
@@ -149,14 +187,83 @@ pub fn build(index: &HashMap<String, u32>, names: &HashMap<String, String>) -> V
             continue;
         }
         skins.sort_by(|a, b| a.label.cmp(&b.label));
+        skins.dedup_by(|a, b| a.label == b.label);
+
+        let mut head_list: Vec<Variant> = Vec::new();
+        if let Some(entries) = head_meshes.get(id) {
+            let mut seen = BTreeSet::new();
+            for (key, number, mesh) in entries {
+                let label = format!(
+                    "{} {number}",
+                    set_name(key).rsplit('/').next().unwrap_or(key)
+                );
+                if !seen.insert(label.clone()) {
+                    continue;
+                }
+                let dir = material
+                    .get(id)
+                    .and_then(|m| lookup(m, key, number))
+                    .cloned()
+                    .or_else(|| skins.first().map(|s| s.material_dir.clone()))
+                    .unwrap_or_default();
+                head_list.push(Variant {
+                    label,
+                    mesh: Some(mesh.clone()),
+                    material_dir: dir,
+                });
+            }
+            head_list.sort_by(|a, b| a.label.cmp(&b.label));
+        }
+
+        let face_list: Vec<Variant> = faces
+            .get(id)
+            .map(|dirs| {
+                dirs.iter()
+                    .map(|dir| Variant {
+                        label: dir.rsplit('/').next().unwrap_or("face").to_string(),
+                        mesh: None,
+                        material_dir: dir.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         characters.push(Character {
             id: id.clone(),
             name: names.get(id).cloned().unwrap_or_else(|| format!("PC_{id}")),
             skins,
+            heads: head_list,
+            faces: face_list,
         });
     }
     characters.sort_by(|a, b| a.id.cmp(&b.id));
     characters
+}
+
+/// Meshes that are not renderable skins (`…_Pose`, cloth physics, collision proxies).
+fn is_auxiliary(stem: &str) -> bool {
+    stem.contains("ClothPhysics")
+        || stem.contains("_PoseAsset")
+        || stem.ends_with("_Pose")
+        || stem.contains("_Clothing")
+        || stem.contains("_Physics")
+}
+
+/// A texture's containing folder (its path without the file name).
+fn folder_of(path: &str) -> String {
+    path.rsplit_once('/')
+        .map(|(dir, _)| dir.to_string())
+        .unwrap_or_default()
+}
+
+/// Insert a mesh under char → key → number.
+fn insert(map: &mut Materials, character: &str, key: &str, number: &str, path: &str) {
+    map.entry(character.to_string())
+        .or_default()
+        .entry(key.to_string())
+        .or_default()
+        .entry(number.to_string())
+        .or_insert_with(|| path.to_string());
 }
 
 /// Load character display names from `<config-root>/roster.json` (`{"004": "Bunny"}`), if present.

@@ -161,12 +161,23 @@ struct ModelRoot;
 struct Menu {
     characters: Vec<catalog::Character>,
     open: bool,
-    /// 0 = the character list, 1 = the skin list.
+    /// 0 = character, 1 = body skin, 2 = head variant, 3 = face.
     column: usize,
     character: usize,
     skin: usize,
+    head: usize,
+    face: usize,
     /// Set when the player confirms; consumed by [`rebuild_model`].
     requested: bool,
+}
+
+/// The meshes and texture folders a selection resolves to.
+struct Resolved {
+    body: String,
+    head: String,
+    body_dir: String,
+    head_dir: String,
+    face_dir: Option<String>,
 }
 
 impl Menu {
@@ -178,8 +189,77 @@ impl Menu {
         self.character().and_then(|c| c.skins.get(self.skin))
     }
 
-    fn skin_count(&self) -> usize {
-        self.character().map(|c| c.skins.len()).unwrap_or(0)
+    fn head(&self) -> Option<&catalog::Variant> {
+        self.character().and_then(|c| c.heads.get(self.head))
+    }
+
+    fn face(&self) -> Option<&catalog::Variant> {
+        self.character().and_then(|c| c.faces.get(self.face))
+    }
+
+    /// The length of each list, in column order.
+    fn lengths(&self) -> [usize; 4] {
+        [
+            self.characters.len(),
+            self.character().map_or(0, |c| c.skins.len()),
+            self.character().map_or(0, |c| c.heads.len()),
+            self.character().map_or(0, |c| c.faces.len()),
+        ]
+    }
+
+    /// The current selection per column.
+    fn selection(&self) -> [usize; 4] {
+        [self.character, self.skin, self.head, self.face]
+    }
+
+    /// Move the selection in column `column` by one, wrapping.
+    fn step(&mut self, column: usize, up: bool) {
+        let length = self.lengths()[column];
+        if length == 0 {
+            return;
+        }
+        let selected: &mut usize = match column {
+            0 => &mut self.character,
+            1 => &mut self.skin,
+            2 => &mut self.head,
+            _ => &mut self.face,
+        };
+        *selected = if up {
+            (*selected + length - 1) % length
+        } else {
+            (*selected + 1) % length
+        };
+    }
+
+    /// Keep every selection inside its list (a shorter list after switching character).
+    fn clamp(&mut self) {
+        let lengths = self.lengths();
+        let mut selection = self.selection();
+        for (selected, length) in selection.iter_mut().zip(lengths) {
+            *selected = if length == 0 {
+                0
+            } else {
+                (*selected).min(length - 1)
+            };
+        }
+        [self.character, self.skin, self.head, self.face] = selection;
+    }
+
+    /// The meshes and folders the current selection resolves to.
+    fn resolved(&self) -> Option<Resolved> {
+        let skin = self.skin()?;
+        let head = self.head();
+        Some(Resolved {
+            body: skin.body.clone(),
+            head: head
+                .and_then(|v| v.mesh.clone())
+                .unwrap_or_else(|| skin.head.clone()),
+            body_dir: skin.material_dir.clone(),
+            head_dir: head
+                .map(|v| v.material_dir.clone())
+                .unwrap_or_else(|| skin.material_dir.clone()),
+            face_dir: self.face().map(|v| v.material_dir.clone()),
+        })
     }
 }
 
@@ -210,10 +290,17 @@ fn open_data() -> anyhow::Result<DataSource> {
     DataSource::open(&paks, key, schema)
 }
 
-/// Build one catalog skin's meshes and textures.
-fn build_character(skin: &catalog::Skin) -> anyhow::Result<CharacterAssets> {
+/// Build a resolved selection's meshes and textures.
+fn build_character(resolved: &Resolved) -> anyhow::Result<CharacterAssets> {
     let mut data = open_data()?;
-    content::load_character(&mut data, &skin.body, &skin.head, &skin.material_dir)
+    content::load_character(
+        &mut data,
+        &resolved.body,
+        &resolved.head,
+        &resolved.body_dir,
+        &resolved.head_dir,
+        resolved.face_dir.as_deref(),
+    )
 }
 
 /// The player entity, the initial model, and the menu overlay. Falls back to a capsule when the
@@ -263,7 +350,7 @@ fn setup_character(
             .join(", ")
     );
 
-    match menu.skin().cloned().map(|skin| build_character(&skin)) {
+    match menu.resolved().map(|r| build_character(&r)) {
         Some(Ok(assets)) => {
             model.root = Some(spawn_model(
                 &mut commands,
@@ -327,6 +414,7 @@ fn spawn_model(
         skeleton,
         head_skeleton,
         head_attach,
+        face_attach,
         feet_offset,
         animation,
     } = assets;
@@ -348,8 +436,16 @@ fn spawn_model(
         .into_iter()
         .map(|spec| materials.add(build_material(images, spec)))
         .collect();
-    let (head_parts, body_parts): (Vec<_>, Vec<_>) =
-        parts.into_iter().partition(|part| part.under_head);
+    let mut body_parts = Vec::new();
+    let mut head_parts = Vec::new();
+    let mut face_parts = Vec::new();
+    for part in parts {
+        match part.attach {
+            content::Attach::Body => body_parts.push(part),
+            content::Attach::Head => head_parts.push(part),
+            content::Attach::Face => face_parts.push(part),
+        }
+    }
 
     // One entity per bone, parented into the hierarchy under the model root, so the skinned mesh's
     // joint matrices carry the player's world transform. The `Animator` poses them from the clips.
@@ -468,6 +564,21 @@ fn spawn_model(
             .entity(node)
             .insert(Hair::new(&head_skeleton, head_bones));
     }
+    // The separate face mesh, static on its own attach node (which follows the head bone).
+    if let Some((index, local)) = face_attach {
+        let node = commands
+            .spawn((local, Visibility::default(), ChildOf(bones[index])))
+            .id();
+        commands.entity(node).with_children(|parent| {
+            for part in face_parts {
+                parent.spawn((
+                    Mesh3d(meshes.add(part.mesh)),
+                    MeshMaterial3d(handles[part.material].clone()),
+                    Transform::default(),
+                ));
+            }
+        });
+    }
     root
 }
 
@@ -503,39 +614,21 @@ fn menu_input(
         return;
     }
     if keys.just_pressed(KeyCode::ArrowLeft) {
-        menu.column = 0;
+        menu.column = (menu.column + 3) % 4;
     }
     if keys.just_pressed(KeyCode::ArrowRight) {
-        menu.column = 1;
+        menu.column = (menu.column + 1) % 4;
     }
     if menu.characters.is_empty() {
         return;
     }
-    let length = if menu.column == 0 {
-        menu.characters.len()
-    } else {
-        menu.skin_count()
-    };
-    if length > 0 {
-        let up = keys.just_pressed(KeyCode::ArrowUp);
-        let down = keys.just_pressed(KeyCode::ArrowDown);
-        if up || down {
-            let selected = if menu.column == 0 {
-                &mut menu.character
-            } else {
-                &mut menu.skin
-            };
-            *selected = if up {
-                (*selected + length - 1) % length
-            } else {
-                (*selected + 1) % length
-            };
-        }
+    let up = keys.just_pressed(KeyCode::ArrowUp);
+    let down = keys.just_pressed(KeyCode::ArrowDown);
+    if up || down {
+        let column = menu.column;
+        menu.step(column, up);
     }
-    // A shorter skin list must not leave the selection out of range.
-    if menu.skin >= menu.skin_count() {
-        menu.skin = 0;
-    }
+    menu.clamp();
     if keys.just_pressed(KeyCode::Enter) && menu.skin().is_some() {
         menu.requested = true;
         menu.open = false;
@@ -557,7 +650,7 @@ fn rebuild_model(
         return;
     }
     menu.requested = false;
-    let (Some(player), Some(skin)) = (model.player, menu.skin().cloned()) else {
+    let (Some(player), Some(resolved)) = (model.player, menu.resolved()) else {
         return;
     };
     if let Some(root) = model.root.take() {
@@ -565,8 +658,11 @@ fn rebuild_model(
     }
     commands.entity(player).remove::<Animator>();
     let name = menu.character().map(|c| c.name.clone()).unwrap_or_default();
-    info!("skin: {name} {}", skin.label);
-    match build_character(&skin) {
+    info!(
+        "skin: {name} {}",
+        menu.skin().map(|s| s.label.clone()).unwrap_or_default()
+    );
+    match build_character(&resolved) {
         Ok(assets) => {
             model.root = Some(spawn_model(
                 &mut commands,
@@ -578,11 +674,11 @@ fn rebuild_model(
                 assets,
             ));
         }
-        Err(error) => warn!("could not load {} ({error:#})", skin.body),
+        Err(error) => warn!("could not load {} ({error:#})", resolved.body),
     }
 }
 
-/// Draw the menu overlay: characters on the left, the selected character's skins on the right.
+/// Draw the menu overlay: characters, body skins, head variants and faces, one column per list.
 fn draw_menu(menu: Res<Menu>, mut texts: Query<&mut Text, With<MenuText>>) {
     let Ok(mut text) = texts.single_mut() else {
         return;
@@ -593,28 +689,14 @@ fn draw_menu(menu: Res<Menu>, mut texts: Query<&mut Text, With<MenuText>>) {
         }
         return;
     }
-    let skins: Vec<String> = menu
-        .character()
-        .map(|c| c.skins.iter().map(|s| s.label.clone()).collect())
-        .unwrap_or_default();
-    let mut lines = vec![format!("{:<26}{}", "CHARACTERS", "SKINS")];
-    for (i, character) in menu.characters.iter().enumerate() {
-        let left = format!(
-            "{} {:>3} {}",
-            if menu.column == 0 && i == menu.character {
-                '>'
-            } else {
-                ' '
-            },
-            character.id,
-            character.name
-        );
-        let right = skins
-            .get(i)
-            .map(|label| {
+    let column = |index: usize, values: Vec<String>| -> Vec<String> {
+        values
+            .into_iter()
+            .enumerate()
+            .map(|(i, label)| {
                 format!(
                     "{} {}",
-                    if menu.column == 1 && i == menu.skin {
+                    if menu.column == index && i == menu.selection()[index] {
                         '>'
                     } else {
                         ' '
@@ -622,8 +704,41 @@ fn draw_menu(menu: Res<Menu>, mut texts: Query<&mut Text, With<MenuText>>) {
                     label
                 )
             })
-            .unwrap_or_default();
-        lines.push(format!("{left:<26}{right}"));
+            .collect()
+    };
+    let characters = column(
+        0,
+        menu.characters
+            .iter()
+            .map(|c| format!("{:>3} {}", c.id, c.name))
+            .collect(),
+    );
+    let (skins, heads, faces) = match menu.character() {
+        Some(c) => (
+            column(1, c.skins.iter().map(|s| s.label.clone()).collect()),
+            column(2, c.heads.iter().map(|h| h.label.clone()).collect()),
+            column(3, c.faces.iter().map(|f| f.label.clone()).collect()),
+        ),
+        None => (Vec::new(), Vec::new(), Vec::new()),
+    };
+    let rows = characters
+        .len()
+        .max(skins.len())
+        .max(heads.len())
+        .max(faces.len());
+    let mut lines = vec![format!(
+        "{:<16}{:<14}{:<16}{}",
+        "CHARACTERS", "BODY SKIN", "HEAD", "FACE"
+    )];
+    for i in 0..rows {
+        let get = |v: &Vec<String>| v.get(i).cloned().unwrap_or_default();
+        lines.push(format!(
+            "{:<16}{:<14}{:<16}{}",
+            get(&characters),
+            get(&skins),
+            get(&heads),
+            get(&faces)
+        ));
     }
     lines.push(String::new());
     lines.push("Tab close    left/right column    up/down select    Enter apply".into());
