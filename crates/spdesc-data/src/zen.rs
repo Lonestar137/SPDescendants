@@ -150,6 +150,50 @@ pub struct Export {
     pub class: String,
 }
 
+/// The physical start of every export, from the export bundle's Serialize entries (which are in
+/// physical order). Returns `None` when the bundle region is malformed or does not describe every
+/// export exactly once, so the caller can fall back to the export map's own offsets.
+fn physical_starts(
+    chunk: &[u8],
+    header_size: usize,
+    bundle_off: usize,
+    after_bundle: usize,
+    exports: &[Export],
+) -> Option<Vec<usize>> {
+    if after_bundle <= bundle_off || after_bundle > chunk.len() {
+        return None;
+    }
+    let region = after_bundle - bundle_off;
+    if !region.is_multiple_of(8) {
+        return None;
+    }
+    let mut order = Vec::new();
+    for i in 0..region / 8 {
+        let at = bundle_off + i * 8;
+        let index = u32le(chunk, at) as usize;
+        let command = u32le(chunk, at + 4);
+        // 0 = Create, 1 = Serialize; serialization order is the physical order.
+        if command == 1 && index < exports.len() {
+            order.push(index);
+        }
+    }
+    if order.len() != exports.len() {
+        return None;
+    }
+    let mut seen = vec![false; exports.len()];
+    let mut starts = vec![usize::MAX; exports.len()];
+    let mut at = header_size;
+    for index in order {
+        if seen[index] {
+            return None;
+        }
+        seen[index] = true;
+        starts[index] = at;
+        at = at.checked_add(exports[index].cooked_size as usize)?;
+    }
+    (at <= chunk.len()).then_some(starts)
+}
+
 /// A parsed Zen package chunk.
 pub struct ZenPackage {
     pub header_size: usize,
@@ -169,9 +213,10 @@ impl ZenPackage {
         let has_versioning_info = u32le(chunk, 0);
         let header_size = u32le(chunk, 4) as usize;
         let cooked_header_size = u32le(chunk, 20) as usize;
-        let import_off = i32le(chunk, 28) as usize;
+        let _import_off = i32le(chunk, 28) as usize;
         let export_off = i32le(chunk, 32) as usize;
         let bundle_off = i32le(chunk, 36) as usize;
+        let after_bundle = i32le(chunk, 40) as usize;
         if !(0 < header_size && header_size <= chunk.len()) {
             bail!("bad header size {header_size}");
         }
@@ -190,7 +235,6 @@ impl ZenPackage {
             bail!("implausible export count {n_exports}");
         }
         let mut exports = Vec::with_capacity(n_exports);
-        let mut export_starts = Vec::with_capacity(n_exports);
         for i in 0..n_exports {
             let at = export_off + i * 72;
             let cooked_offset = u64le(chunk, at);
@@ -203,20 +247,29 @@ impl ZenPackage {
                 2 => format!("<package import {class_index}>"),
                 _ => "<null>".into(),
             };
-            // Physical start: the header plus the export's offset within the cooked region.
-            // `cooked_header_size` is the size of the header block that precedes that region.
-            let start = header_size
-                .checked_add(cooked_offset as usize)
-                .and_then(|v| v.checked_sub(cooked_header_size));
             exports.push(Export {
                 cooked_offset,
                 cooked_size,
                 name,
                 class,
             });
-            export_starts.push(start.unwrap_or(usize::MAX));
         }
-        let _ = import_off;
+        // Physical layout comes from the export bundle, not the export map: `CookedSerialOffset`
+        // is only the offset within a virtual cooked region, and it is *not* the physical order for
+        // every package (PC_001's body physically serializes exports 2, 4, 0, 1, 3). The bundle's
+        // Serialize entries are in physical order, so accumulate the cooked sizes along them.
+        let export_starts = physical_starts(chunk, header_size, bundle_off, after_bundle, &exports)
+            .unwrap_or_else(|| {
+                exports
+                    .iter()
+                    .map(|e| {
+                        header_size
+                            .checked_add(e.cooked_offset as usize)
+                            .and_then(|v| v.checked_sub(cooked_header_size))
+                            .unwrap_or(usize::MAX)
+                    })
+                    .collect()
+            });
         Ok(Self {
             header_size,
             cooked_header_size,

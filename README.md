@@ -27,6 +27,16 @@ scripts/check.sh                   # gate the round
 scripts/gates.sh                   # full chain before a land
 ```
 
+## Playing
+
+`Tab` opens the character select screen: pick a character on the left, one of its skins on the
+right, and `Enter` to rebuild the model in place (the cursor is released while the menu is open).
+Otherwise: `WASD`/arrows move, `Shift` sprints, `Space` jumps, the mouse orbits, left-click fires,
+and `R` reloads.
+
+Character names come from `spdesc-config/roster.json` (a small id → name index, like the key and
+property mapping beside it); without it characters are labelled by their id.
+
 ## Rules that matter most
 
 - **`GAME_DATA` is read-only runtime input.** Resolve through

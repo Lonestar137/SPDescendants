@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, bail};
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::VertexAttributeValues;
-use bevy::prelude::{Mat4, Mesh, Quat, Transform, Vec3, info, warn};
+use bevy::prelude::{Mat4, Mesh, Quat, Transform, Vec3, info};
 use bevy::render::mesh::Indices;
 
 use spdesc_data::anim::AnimClip;
@@ -25,37 +25,6 @@ use spdesc_data::mesh::{MeshLod, Section, SkeletalMesh, Transform as UeTransform
 use spdesc_data::property::{Ctx, Names, Natives, Reader, Schema};
 use spdesc_data::texture::Texture;
 use spdesc_data::zen::{GlobalNames, ZenPackage};
-
-/// The Ultimate Bunny body mesh package path and its mesh export name.
-pub const BODY_PATH: &str =
-    "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/001PC_004_U_CMN_BODY_001.uasset";
-const BODY_EXPORT: &str = "PC_004_U_CMN_BODY_001";
-/// The Ultimate Bunny head mesh package path and its mesh export name.
-pub const HEAD_PATH: &str =
-    "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/001PC_004_U_CMN_HEAD_001.uasset";
-const HEAD_EXPORT: &str = "PC_004_U_CMN_HEAD_001";
-/// The `Material/001` set: this mesh's slot names end in `_001`, so these are its textures (the
-/// `Material/002` set belongs to the `..._BODY_002` mesh and is a different skin).
-/// The body (skin) base-colour texture. Only `Material/002` carries the shared bare-body skin.
-pub const BODY_TEXTURE_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/002/TexturePC_004_U_CMN_002_Body_C.uasset";
-/// The PartA base-colour texture.
-pub const PARTA_TEXTURE_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/001/TexturePC_004_U_CMN_001_PartA_C.uasset";
-/// The PartB base-colour texture.
-pub const PARTB_TEXTURE_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/001/TexturePC_004_U_CMN_001_PartB_C.uasset";
-/// The helmet base-colour texture.
-pub const HELMET_TEXTURE_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/001/TexturePC_004_U_CMN_001_Helmet_C.uasset";
-/// The PartA normal map (BC5).
-const PARTA_NORMAL_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/001/TexturePC_004_U_CMN_001_PartA_N.uasset";
-/// The PartA packed map (R=AO, G=roughness, B=metallic).
-const PARTA_PACKED_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/001/TexturePC_004_U_CMN_001_PartA_P.uasset";
-/// The PartB normal map (BC5).
-const PARTB_NORMAL_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/001/TexturePC_004_U_CMN_001_PartB_N.uasset";
-/// The PartB packed map.
-const PARTB_PACKED_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/001/TexturePC_004_U_CMN_001_PartB_P.uasset";
-/// The helmet normal map (BC5).
-const HELMET_NORMAL_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/001/TexturePC_004_U_CMN_001_Helmet_N.uasset";
-/// The helmet packed map.
-const HELMET_PACKED_PATH: &str = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/001/TexturePC_004_U_CMN_001_Helmet_P.uasset";
 
 /// One drawable piece of the character: a bind-pose sub-mesh and how to shade it.
 pub struct Part {
@@ -170,7 +139,13 @@ impl DataSource {
         let i = package
             .exports
             .iter()
-            .position(|e| e.name == export)
+            .position(|e| !export.is_empty() && e.name == export)
+            .or_else(|| {
+                package
+                    .exports
+                    .iter()
+                    .position(|e| e.class.ends_with("SkeletalMesh"))
+            })
             .with_context(|| format!("{export} export missing from {path}"))?;
         let variants = package.export_data_variants(&bytes, i);
         if variants.is_empty() {
@@ -424,65 +399,106 @@ fn section_mesh(lod: &MeshLod, section: &Section, skinned: bool, feet: &mut f32)
     Ok(mesh)
 }
 
-/// The decoded PBR maps for one material slot. Each slot's maps are consumed once, by the first
-/// section that names it.
-#[derive(Default)]
+/// The decoded PBR maps for one material slot.
+#[derive(Default, Clone)]
 struct Maps {
     base: Option<Texture>,
     normal: Option<Texture>,
     packed: Option<Texture>,
 }
 
-/// Decode a slot's base colour, and its normal and packed maps when it has them.
-fn load_maps(
-    data: &mut DataSource,
-    base: &str,
-    normal: Option<&str>,
-    packed: Option<&str>,
-) -> Maps {
-    Maps {
-        base: data.texture(base).ok(),
-        normal: normal.and_then(|p| data.texture(p).ok()),
-        packed: packed.and_then(|p| data.texture(p).ok()),
+/// The file-name fragments that identify a slot's textures, in the order they are tried. Glass and
+/// hair have no decoded maps (they are flat tints), so they want no fragments.
+fn slot_keywords(slot: &str) -> &'static [&'static str] {
+    let s = slot.to_ascii_lowercase();
+    if s.contains("glass") || s.contains("hair") || s.contains("fur") {
+        &[]
+    } else if s.contains("helmet") {
+        &["helmet"]
+    } else if s.contains("part_a") || s.contains("parta") || s.contains("part a") {
+        &["parta", "part_a"]
+    } else if s.contains("part_b") || s.contains("partb") || s.contains("part b") {
+        &["partb", "part_b"]
+    } else if s.contains("head") {
+        &["head"]
+    } else if s.contains("skin") || s.contains("body") {
+        &["body", "skin"]
+    } else {
+        &[]
     }
 }
 
-/// The material a slot name gets, removing that slot's maps from `slots` on first use. Slots are
-/// matched case-insensitively on a substring; glass and hair are tints (their materials are not
-/// among the decoded maps).
-fn material_for(slot: &str, slots: &mut HashMap<&'static str, Maps>) -> MaterialSpec {
-    let s = slot.to_ascii_lowercase();
-    let key = if s.contains("glass") || s.contains("hair") {
-        None
-    } else if s.contains("helmet") {
-        Some("helmet")
-    } else if s.contains("partb") {
-        Some("partb")
-    } else if s.contains("part") {
-        Some("parta")
-    } else if s.contains("skin") || s.contains("body") {
-        Some("skin")
-    } else {
-        None
-    };
-    if let Some(key) = key
-        && let Some(m) = slots.remove(key)
-    {
-        return MaterialSpec {
-            base: m.base,
-            packed: m.packed,
-            normal: m.normal,
-            tint: [1.0, 1.0, 1.0, 1.0],
-            // The maps carry the variation; the scalars only multiply them.
-            roughness: 1.0,
-            metallic: 1.0,
-        };
+/// Load a slot's base colour and its normal and packed siblings from `material_dir`. The base map is
+/// any `*_C.uasset` in the folder whose name contains one of `keywords`; the normal and packed maps
+/// are the same stem with `_N` / `_P` (BC5 normals and the game's R=AO/G=roughness/B=metallic pack).
+fn load_skin_maps(data: &mut DataSource, material_dir: &str, keywords: &[&str]) -> Maps {
+    if keywords.is_empty() {
+        return Maps::default();
     }
+    let mut base: Option<String> = None;
+    for key in data.index.keys() {
+        if !key.starts_with(material_dir) || !key.ends_with(".uasset") {
+            continue;
+        }
+        let name = key.rsplit('/').next().unwrap_or(key).to_ascii_lowercase();
+        if !name.ends_with("_c.uasset") {
+            continue;
+        }
+        if keywords.iter().any(|k| name.contains(k)) {
+            base = Some(key.clone());
+            break;
+        }
+    }
+    let Some(base) = base else {
+        return Maps::default();
+    };
+    let stem = base.trim_end_matches(".uasset");
+    let sibling = |suffix: &str| {
+        let candidate = format!("{}{suffix}.uasset", &stem[..stem.len() - 2]);
+        data.index.contains_key(&candidate).then_some(candidate)
+    };
+    let normal = sibling("_N");
+    let packed = sibling("_P");
+    Maps {
+        base: data.texture(&base).ok(),
+        normal: normal.as_deref().and_then(|p| data.texture(p).ok()),
+        packed: packed.as_deref().and_then(|p| data.texture(p).ok()),
+    }
+}
+
+/// The material a slot name gets: the skin's decoded maps when its folder has them, otherwise a
+/// flat tint. Glass and hair are always tints (their materials are not among the decoded maps).
+fn material_for(
+    data: &mut DataSource,
+    material_dir: &str,
+    slot: &str,
+    cache: &mut HashMap<String, Maps>,
+) -> MaterialSpec {
+    let keywords = slot_keywords(slot);
+    if !keywords.is_empty() {
+        let key = keywords.join(",");
+        let maps = cache
+            .entry(key)
+            .or_insert_with(|| load_skin_maps(data, material_dir, keywords))
+            .clone();
+        if maps.base.is_some() {
+            return MaterialSpec {
+                base: maps.base,
+                packed: maps.packed,
+                normal: maps.normal,
+                tint: [1.0, 1.0, 1.0, 1.0],
+                // The maps carry the variation; the scalars only multiply them.
+                roughness: 1.0,
+                metallic: 1.0,
+            };
+        }
+    }
+    let s = slot.to_ascii_lowercase();
     let (tint, roughness, metallic) = if s.contains("glass") {
         ([0.45, 0.60, 0.75, 0.35], 0.05, 0.0)
-    } else if s.contains("hair") {
-        // Bunny's hair is a brown braid; its colour comes from a hair material this MVP does not
-        // decode, so a brown, semi-glossy neutral stands in.
+    } else if s.contains("hair") || s.contains("fur") {
+        // The braid's colour comes from a hair material this MVP does not decode, so a brown,
+        // semi-glossy neutral stands in.
         ([0.26, 0.16, 0.11, 1.0], 0.45, 0.0)
     } else {
         ([0.6, 0.55, 0.5, 1.0], 0.6, 0.0)
@@ -497,43 +513,17 @@ fn material_for(slot: &str, slots: &mut HashMap<&'static str, Maps>) -> Material
     }
 }
 
-/// Load the Ultimate Bunny body and head, decoding the two body textures as well. Every section of
-/// every LOD 0 becomes a [`Part`]; the returned `feet_offset` places the model on the floor.
-pub fn load_bunny(data: &mut DataSource) -> Result<CharacterAssets> {
-    let body = data.mesh(BODY_PATH, BODY_EXPORT).context("body mesh")?;
-    let head = data.mesh(HEAD_PATH, HEAD_EXPORT).context("head mesh")?;
-    let mut slots: HashMap<&'static str, Maps> = HashMap::new();
-    slots.insert("skin", load_maps(data, BODY_TEXTURE_PATH, None, None));
-    slots.insert(
-        "parta",
-        load_maps(
-            data,
-            PARTA_TEXTURE_PATH,
-            Some(PARTA_NORMAL_PATH),
-            Some(PARTA_PACKED_PATH),
-        ),
-    );
-    slots.insert(
-        "partb",
-        load_maps(
-            data,
-            PARTB_TEXTURE_PATH,
-            Some(PARTB_NORMAL_PATH),
-            Some(PARTB_PACKED_PATH),
-        ),
-    );
-    slots.insert(
-        "helmet",
-        load_maps(
-            data,
-            HELMET_TEXTURE_PATH,
-            Some(HELMET_NORMAL_PATH),
-            Some(HELMET_PACKED_PATH),
-        ),
-    );
-    if slots["skin"].base.is_none() {
-        warn!("body texture failed to decode; using flat colours");
-    }
+/// Load one skin: `body` and `head` mesh package paths and the `material_dir` its textures live in.
+/// Every section of every LOD 0 becomes a [`Part`]; `feet_offset` places the model on the floor.
+pub fn load_character(
+    data: &mut DataSource,
+    body_path: &str,
+    head_path: &str,
+    material_dir: &str,
+) -> Result<CharacterAssets> {
+    let body = data.mesh(body_path, "").context("body mesh")?;
+    let head = data.mesh(head_path, "").context("head mesh")?;
+    let mut cache: HashMap<String, Maps> = HashMap::new();
 
     // The head mesh is authored in model space (its twintails reach 1.3 m below its origin), so it
     // cannot simply follow the head bone (whose bind orientation follows the neck and would twist
@@ -576,7 +566,7 @@ pub fn load_bunny(data: &mut DataSource) -> Result<CharacterAssets> {
             let material = match material_of_slot.get(&slot) {
                 Some(i) => *i,
                 None => {
-                    let material_spec = material_for(&slot, &mut slots);
+                    let material_spec = material_for(data, material_dir, &slot, &mut cache);
                     materials.push(material_spec);
                     let i = materials.len() - 1;
                     material_of_slot.insert(slot.clone(), i);
@@ -873,7 +863,12 @@ mod tests {
             return None;
         };
         let mut data = DataSource::open(&paks, key, schema).expect("open data source");
-        Some(load_bunny(&mut data).expect("load the Ultimate Bunny"))
+        let body =
+            "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/001PC_004_U_CMN_BODY_001.uasset";
+        let head =
+            "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/001PC_004_U_CMN_HEAD_001.uasset";
+        let material = "/M1/Content/Characters/PC/MESH/004/U/Skel/SKIN/CMN/Material/001";
+        Some(load_character(&mut data, body, head, material).expect("load a skin"))
     }
 
     /// The app's content path builds the body and head meshes and decodes their textures from the
@@ -964,6 +959,48 @@ mod tests {
         );
     }
 
+    /// The catalog enumerates characters and skins from the real index, and every skin names a
+    /// body mesh and a material folder.
+    #[test]
+    fn catalog_has_characters_and_skins() {
+        let Some(paks) = spdesc_data::paks_dir() else {
+            return;
+        };
+        let Some(key) = spdesc_data::key::aes_key() else {
+            return;
+        };
+        let Ok(schema) = spdesc_data::mapping::load() else {
+            return;
+        };
+        let data = DataSource::open(&paks, key, schema).expect("open data source");
+        let catalog = crate::catalog::build(&data.index, &crate::catalog::load_names());
+        for character in &catalog {
+            eprintln!(
+                "  {}/{} : {} skins",
+                character.id,
+                character.name,
+                character.skins.len()
+            );
+            for skin in &character.skins {
+                eprintln!(
+                    "      {} body={:?} head={:?} material={:?}",
+                    skin.label,
+                    skin.body.rsplit('/').next().unwrap(),
+                    skin.head.rsplit('/').next().unwrap(),
+                    skin.material_dir
+                        .rmatch_indices("SKIN/")
+                        .next()
+                        .map(|(i, _)| &skin.material_dir[i + 5..])
+                );
+            }
+        }
+        assert!(!catalog.is_empty(), "the catalog is empty");
+        assert!(
+            catalog.iter().any(|c| c.skins.len() > 1),
+            "a character with several skins is expected"
+        );
+    }
+
     /// A pure conversion check that does not need data: game `(x, y, z)` cm maps to Bevy
     /// `(x, z, -y)` m.
     #[test]
@@ -972,28 +1009,23 @@ mod tests {
         assert_eq!(dir_to_bevy([0.0, 1.0, 0.0]), [0.0, 0.0, -1.0]);
     }
 
+    /// Slot names pick the texture fragments to look for, and glass/hair never resolve to decoded
+    /// maps (they are flat tints).
     #[test]
-    fn slots_choose_their_material() {
-        let tex = || Texture {
-            width: 1,
-            height: 1,
-            rgba: vec![0, 0, 0, 255],
-        };
-        let maps = || Maps {
-            base: Some(tex()),
-            normal: None,
-            packed: None,
-        };
-        let mut slots: HashMap<&'static str, Maps> = HashMap::new();
-        slots.insert("skin", maps());
-        slots.insert("parta", maps());
-        slots.insert("partb", maps());
-        slots.insert("helmet", maps());
-        assert!(material_for("Skin", &mut slots).base.is_some());
-        assert!(material_for("PartA", &mut slots).base.is_some());
-        assert!(material_for("PartB", &mut slots).base.is_some());
-        assert!(material_for("Helmet", &mut slots).base.is_some());
-        assert!(material_for("Hair", &mut slots).base.is_none());
-        assert!(material_for("GlassA", &mut slots).base.is_none());
+    fn slots_choose_their_texture_keywords() {
+        assert_eq!(
+            slot_keywords("PC_004_U_CMN_BODY_001_PartA"),
+            ["parta", "part_a"]
+        );
+        assert_eq!(slot_keywords("PC_001_A_MF_001_part_b"), ["partb", "part_b"]);
+        assert_eq!(
+            slot_keywords("PC_004_U_CMN_BODY_001_Skin"),
+            ["body", "skin"]
+        );
+        assert_eq!(slot_keywords("PC_001_A_MF_001_Head"), ["head"]);
+        assert_eq!(slot_keywords("PC_004_U_CMN_HEAD_001_Helmet"), ["helmet"]);
+        assert!(slot_keywords("PC_004_U_CMN_HEAD_001_Hair").is_empty());
+        assert!(slot_keywords("PC_004_U_CMN_BODY_001_GlassA").is_empty());
+        assert!(slot_keywords("something_else").is_empty());
     }
 }

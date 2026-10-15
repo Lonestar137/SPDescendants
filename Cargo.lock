@@ -5113,6 +5113,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bevy",
+ "serde_json",
  "spdesc-data",
  "spdesc-game-core",
 ]
