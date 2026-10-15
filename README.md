@@ -46,20 +46,26 @@ optional — without it, the app falls back to its own synthesised cues and the 
 
 ## Playing
 
-`Tab` opens/closes the selection menu. Use left/right to choose the character, body-skin, head, or
-face column; use up/down to change its selection; press `Enter` to apply, or `Escape` to close.
-Otherwise: `WASD`/arrows move, `Shift` sprints, `Space` jumps, the mouse orbits, right-click aims,
-hold left-click to fire, and `R` reloads.
+`Tab` opens the menu and closes it. It has two pages, swapped with `[` and `]`. **Character** holds the
+four lists — character, body skin, head, face — which scroll, so nothing runs off the screen; the
+focused list is the one the arrows walk, `PageUp`/`PageDown` jump a page and `Home`/`End` go to the
+ends. **Developer** holds the level and prestige, the buttons to grant experience, take the prestige
+on offer or reset it, and the gun-fire and master volume sliders. Every choice previews on the
+character as it is highlighted, so nothing has to be confirmed to be seen; `Enter`, `Escape`, `Tab`
+or the Close button all apply and close. Otherwise: `WASD`/arrows move, `Shift` sprints, `Space`
+jumps, the mouse orbits, right-click aims, hold left-click to fire, and `R` reloads.
 
 Each target pays experience — a hit is worth 10 and a kill 100 — against Modern Warfare 2's own
 rank table, so the bottom-left panel shows the level, the rank insignia, and how far the next rank
 is. Reaching one rings the game's promotion fanfare; the ten prestige insignia are read from the
-same install. **The level is kept between runs**, in `spdesc-config/career.json`.
+same install. **The level is kept between runs**, in `spdesc-config/career.json`, as are the sound
+levels in `spdesc-config/settings.json`. `P` grants a chunk of experience and `O` takes the prestige
+on offer, the same two things the menu's buttons do.
 
-`F1` opens a developer menu over the game: the level and prestige it is acting on, a button to
-grant 25 000 experience, one to take the prestige on offer, one to reset the prestige, and sliders
-for the gun-fire and master volumes. The levels are kept too, in `spdesc-config/settings.json`. The
-menu also has the same two things on keys, `P` to grant experience and `O` to prestige.
+A model is built on a worker thread rather than in the frame: the menu asks for the one it is
+showing and prefetches the ones a step away, so stepping through a list previews without waiting
+where the neighbour was already built. The worker builds only the newest request in its queue, so a
+fast run down a list collapses to wherever it stopped.
 
 Character names come from `spdesc-config/roster.json` (a small id → name index, like the key and
 property mapping beside it); without it characters are labelled by their id.

@@ -152,6 +152,18 @@ pub struct Skeleton {
     pub bind: Vec<UeTransform>,
 }
 
+/// Open the container and the local state: the paks folder, the key, and the property mapping.
+/// Absent data is an error here, never a panic — the caller decides what to fall back to.
+pub fn open_data() -> Result<DataSource> {
+    let paks =
+        spdesc_data::paks_dir().ok_or_else(|| anyhow::anyhow!("no TFD_DATA folder found"))?;
+    let key = spdesc_data::key::aes_key()
+        .ok_or_else(|| anyhow::anyhow!("no container key (spdesc-config/keys.json)"))?;
+    let schema =
+        spdesc_data::mapping::load().map_err(|e| anyhow::anyhow!("no property mapping: {e}"))?;
+    DataSource::open(&paks, key, schema)
+}
+
 /// The container, its directory index, and the global name table: everything the per-asset
 /// loaders share.
 pub struct DataSource {

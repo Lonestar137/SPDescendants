@@ -9,8 +9,9 @@ mod audio;
 mod catalog;
 mod combat;
 mod content;
-mod devmenu;
 mod hair;
+mod loading;
+mod menu;
 mod player;
 mod progress;
 mod settings;
@@ -23,20 +24,24 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 
-use devmenu::{apply_volumes, dev_menu_input, draw_dev_menu, setup_dev_menu};
+use menu::{
+    draw_dev, draw_pages, draw_rows, draw_scrollbars, draw_tabs, menu_keys, menu_pointer,
+    place_menu, setup_menu,
+};
 use progress::{
     award_experience, debug_progress, draw_progress, save_career, save_career_on_exit,
     setup_progress,
 };
-use settings::{CareerSave, Settings};
+use settings::{CareerSave, Settings, apply_volumes};
 use spdesc_mw2::SoundBank;
 
 use audio::Sounds;
 use combat::{
     Muzzle, Weapon, WeaponRig, age_effects, fire_weapon, spawn_enemies, tick_weapon, update_targets,
 };
-use content::{CharacterAssets, DataSource, MaterialSpec};
+use content::{CharacterAssets, MaterialSpec};
 use hair::{Hair, animate_hair};
+use loading::{ModelKey, ModelLoader};
 use player::{
     Animator, CameraRig, Player, animate_locomotion, drive_player, follow_camera, grab_cursor,
     toggle_cursor,
@@ -60,9 +65,9 @@ fn main() {
             ..default()
         })
         .insert_resource(ClearColor(Color::srgb(0.46, 0.55, 0.68)))
-        // The dev menu's open flag is read by a run condition, which runs before any startup
-        // system does: it has to exist from the first frame.
-        .init_resource::<devmenu::DevMenu>()
+        // The menu's open flag is read by a run condition, which runs before any startup system
+        // does: it has to exist from the first frame.
+        .init_resource::<menu::Menu>()
         .add_systems(
             Startup,
             (
@@ -70,8 +75,9 @@ fn main() {
                 grab_cursor,
                 setup_hud,
                 setup_progress,
-                setup_dev_menu,
+                setup_menu,
                 setup_settings,
+                start_loader,
                 setup_mw2,
                 setup_character,
             ),
@@ -79,15 +85,21 @@ fn main() {
         .add_systems(
             Update,
             (
-                menu_input,
-                rebuild_model,
-                draw_menu,
+                menu_keys,
+                menu_pointer,
+                stream_models,
+                apply_model,
+                save_selection,
+                place_menu,
+                draw_pages,
+                draw_tabs,
+                draw_rows,
+                draw_scrollbars,
+                draw_dev,
                 draw_hud,
                 draw_progress,
                 award_experience,
                 debug_progress,
-                dev_menu_input,
-                draw_dev_menu,
                 apply_volumes,
                 save_career,
                 save_career_on_exit,
@@ -189,6 +201,11 @@ fn setup_mw2(
     commands.insert_resource(insignia);
 }
 
+/// Start the thread that builds character models, so a preview never blocks the frame.
+fn start_loader(mut commands: Commands) {
+    commands.insert_resource(ModelLoader::start());
+}
+
 /// Load the sound levels and report them, so a run says which ones it is using.
 fn setup_settings(mut commands: Commands) {
     let settings = Settings::load();
@@ -285,162 +302,14 @@ fn checker_image(size: u32, cell: u32) -> Image {
 #[derive(Component)]
 struct ModelRoot;
 
-/// The character select screen's state.
-#[derive(Resource, Default)]
-struct Menu {
-    characters: Vec<catalog::Character>,
-    open: bool,
-    /// 0 = character, 1 = body skin, 2 = head variant, 3 = face.
-    column: usize,
-    character: usize,
-    skin: usize,
-    head: usize,
-    face: usize,
-    /// Set when the player confirms; consumed by [`rebuild_model`].
-    requested: bool,
-}
-
-/// The meshes and texture folders a selection resolves to.
-struct Resolved {
-    body: String,
-    head: String,
-    body_dir: String,
-    head_dir: String,
-    face_dir: Option<String>,
-}
-
-impl Menu {
-    fn character(&self) -> Option<&catalog::Character> {
-        self.characters.get(self.character)
-    }
-
-    fn skin(&self) -> Option<&catalog::Skin> {
-        self.character().and_then(|c| c.skins.get(self.skin))
-    }
-
-    fn head(&self) -> Option<&catalog::Variant> {
-        self.character().and_then(|c| c.heads.get(self.head))
-    }
-
-    fn face(&self) -> Option<&catalog::Variant> {
-        self.character().and_then(|c| c.faces.get(self.face))
-    }
-
-    /// The length of each list, in column order.
-    fn lengths(&self) -> [usize; 4] {
-        [
-            self.characters.len(),
-            self.character().map_or(0, |c| c.skins.len()),
-            self.character().map_or(0, |c| c.heads.len()),
-            self.character().map_or(0, |c| c.faces.len()),
-        ]
-    }
-
-    /// The current selection per column.
-    fn selection(&self) -> [usize; 4] {
-        [self.character, self.skin, self.head, self.face]
-    }
-
-    /// Move the selection in column `column` by one, wrapping.
-    fn step(&mut self, column: usize, up: bool) {
-        let length = self.lengths()[column];
-        if length == 0 {
-            return;
-        }
-        let selected: &mut usize = match column {
-            0 => &mut self.character,
-            1 => &mut self.skin,
-            2 => &mut self.head,
-            _ => &mut self.face,
-        };
-        *selected = if up {
-            (*selected + length - 1) % length
-        } else {
-            (*selected + 1) % length
-        };
-    }
-
-    /// Keep every selection inside its list (a shorter list after switching character).
-    fn clamp(&mut self) {
-        let lengths = self.lengths();
-        let mut selection = self.selection();
-        for (selected, length) in selection.iter_mut().zip(lengths) {
-            *selected = if length == 0 {
-                0
-            } else {
-                (*selected).min(length - 1)
-            };
-        }
-        [self.character, self.skin, self.head, self.face] = selection;
-    }
-
-    /// The current selection as it is written to disk, and applied from it.
-    fn saved(&self) -> settings::Selection {
-        settings::Selection {
-            character: self.character().map(|c| c.id.clone()).unwrap_or_default(),
-            skin: self.skin().map(|s| s.label.clone()).unwrap_or_default(),
-            head: self.head().map(|h| h.label.clone()).unwrap_or_default(),
-            face: self.face().map(|f| f.label.clone()).unwrap_or_default(),
-        }
-    }
-
-    /// Move the selection onto `saved`, per column and independently: a character that no longer
-    /// exists, or a skin its character no longer ships, leaves that column where it started rather
-    /// than failing the whole selection.
-    fn restore(&mut self, saved: &settings::Selection) {
-        if let Some(character) = self.characters.iter().position(|c| c.id == saved.character) {
-            self.character = character;
-        }
-        let found = {
-            let Some(character) = self.character() else {
-                return;
-            };
-            (
-                character.skins.iter().position(|s| s.label == saved.skin),
-                character.heads.iter().position(|h| h.label == saved.head),
-                character.faces.iter().position(|f| f.label == saved.face),
-            )
-        };
-        if let Some(skin) = found.0 {
-            self.skin = skin;
-        }
-        if let Some(head) = found.1 {
-            self.head = head;
-        }
-        if let Some(face) = found.2 {
-            self.face = face;
-        }
-        self.clamp();
-    }
-
-    /// The meshes and folders the current selection resolves to.
-    fn resolved(&self) -> Option<Resolved> {
-        let skin = self.skin()?;
-        let head = self.head();
-        Some(Resolved {
-            body: skin.body.clone(),
-            head: head
-                .and_then(|v| v.mesh.clone())
-                .unwrap_or_else(|| skin.head.clone()),
-            body_dir: skin.material_dir.clone(),
-            head_dir: head
-                .map(|v| v.material_dir.clone())
-                .unwrap_or_else(|| skin.material_dir.clone()),
-            face_dir: self.face().map(|v| v.material_dir.clone()),
-        })
-    }
-}
-
 /// The spawned player and the root of its current model subtree.
 #[derive(Resource, Default)]
 struct Model {
     player: Option<Entity>,
     root: Option<Entity>,
+    /// The model those meshes were built from, so the loader is not asked for it again.
+    shown: Option<ModelKey>,
 }
-
-/// The overlay text node the menu draws into.
-#[derive(Component)]
-struct MenuText;
 
 /// The overlay text node the HUD (ammunition, reload) draws into.
 #[derive(Component)]
@@ -494,13 +363,12 @@ fn setup_hud(mut commands: Commands) {
 
 /// Draw the HUD: the crosshair over the aim, and the magazine and reload countdown.
 fn draw_hud(
-    menu: Res<Menu>,
-    dev: Res<devmenu::DevMenu>,
+    menu: Res<menu::Menu>,
     weapons: Query<&Weapon>,
     mut texts: Query<&mut Text, With<HudText>>,
     mut reticles: Query<&mut Visibility, With<Reticle>>,
 ) {
-    let visibility = if menu.open || dev.open {
+    let visibility = if menu.open {
         Visibility::Hidden
     } else {
         Visibility::Inherited
@@ -511,7 +379,7 @@ fn draw_hud(
     let Ok(mut text) = texts.single_mut() else {
         return;
     };
-    if menu.open || dev.open {
+    if menu.open {
         if !text.0.is_empty() {
             text.0.clear();
         }
@@ -533,34 +401,15 @@ fn draw_hud(
     }
 }
 
-/// Gameplay systems only run while no menu is open: the character menu and the dev menu both hold
-/// the game and free the cursor.
-fn menu_closed(menu: Res<Menu>, dev: Res<devmenu::DevMenu>) -> bool {
-    !menu.open && !dev.open
+/// Gameplay systems only run while the menu is closed: it holds the game and frees the cursor.
+fn menu_closed(menu: Res<menu::Menu>) -> bool {
+    !menu.open
 }
 
 /// Open the container and the local state.
-fn open_data() -> anyhow::Result<DataSource> {
-    let paks =
-        spdesc_data::paks_dir().ok_or_else(|| anyhow::anyhow!("no TFD_DATA folder found"))?;
-    let key = spdesc_data::key::aes_key()
-        .ok_or_else(|| anyhow::anyhow!("no container key (spdesc-config/keys.json)"))?;
-    let schema =
-        spdesc_data::mapping::load().map_err(|e| anyhow::anyhow!("no property mapping: {e}"))?;
-    DataSource::open(&paks, key, schema)
-}
-
-/// Build a resolved selection's meshes and textures.
-fn build_character(resolved: &Resolved) -> anyhow::Result<CharacterAssets> {
-    let mut data = open_data()?;
-    content::load_character(
-        &mut data,
-        &resolved.body,
-        &resolved.head,
-        &resolved.body_dir,
-        &resolved.head_dir,
-        resolved.face_dir.as_deref(),
-    )
+fn build_character(key: &ModelKey) -> anyhow::Result<CharacterAssets> {
+    let mut data = content::open_data()?;
+    key.load(&mut data)
 }
 
 /// The player entity, the initial model, and the menu overlay. Falls back to a capsule when the
@@ -583,45 +432,30 @@ fn setup_character(
     let mut model = Model {
         player: Some(player),
         root: None,
+        shown: None,
     };
-    let mut menu = Menu::default();
-    match open_data().map(|data| catalog::build(&data.index, &catalog::load_names())) {
-        Ok(characters) => menu.characters = characters,
+    let mut menu = menu::Menu::default();
+    let mut catalog = Vec::new();
+    match content::open_data().map(|data| catalog::build(&data.index, &catalog::load_names())) {
+        Ok(characters) => catalog = characters,
         Err(error) => warn!("could not enumerate characters ({error:#})"),
     }
-    // Default to Bunny's `CMN 001`, the skin this checkout started with.
-    if let Some(i) = menu.characters.iter().position(|c| c.id == "004") {
-        menu.character = i;
-        if let Some(j) = menu.characters[i]
-            .skins
-            .iter()
-            .position(|s| s.label == "CMN 001")
-        {
-            menu.skin = j;
-        }
-    }
+    let listed = catalog.len();
+    let names = catalog
+        .iter()
+        .map(|c| format!("{} {}", c.id, c.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    menu.fill(catalog);
     // The last applied selection wins over the default, so a choice survives a restart.
     if let Some(saved) = settings::Selection::load() {
         menu.restore(&saved);
-        info!(
-            "selection: {} {} / head {} / face {}",
-            menu.character().map(|c| c.name.clone()).unwrap_or_default(),
-            menu.skin().map(|s| s.label.clone()).unwrap_or_default(),
-            menu.head().map(|h| h.label.clone()).unwrap_or_default(),
-            menu.face().map(|f| f.label.clone()).unwrap_or_default(),
-        );
+        info!("selection: {}", menu.saved().describe());
     }
-    info!(
-        "catalog: {} characters, e.g. {}",
-        menu.characters.len(),
-        menu.characters
-            .iter()
-            .map(|c| format!("{} {}", c.id, c.name))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+    info!("catalog: {listed} characters, e.g. {names}");
 
-    match menu.resolved().map(|r| build_character(&r)) {
+    let initial = menu.key();
+    match initial.as_ref().map(build_character) {
         Some(Ok(assets)) => {
             model.root = Some(spawn_model(
                 &mut commands,
@@ -632,6 +466,7 @@ fn setup_character(
                 player,
                 assets,
             ));
+            model.shown = initial;
         }
         Some(Err(error)) => warn!("could not build the character ({error:#}); using a capsule"),
         None => {}
@@ -650,22 +485,6 @@ fn setup_character(
     }
     commands.insert_resource(model);
     commands.insert_resource(menu);
-
-    commands.spawn((
-        MenuText,
-        Text::new(""),
-        TextFont {
-            font_size: bevy::text::FontSize::Px(15.0),
-            ..default()
-        },
-        TextColor(Color::srgb(0.96, 0.96, 0.98)),
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(18.0),
-            top: Val::Px(14.0),
-            ..default()
-        },
-    ));
 }
 
 /// Spawn a skin's model subtree under a fresh [`ModelRoot`] on `player`, and return the root.
@@ -915,161 +734,80 @@ pub(crate) fn set_cursor_grab(
     }
 }
 
-/// Tab opens and closes the menu; while it is open the arrows move and Enter applies.
-fn menu_input(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut menu: ResMut<Menu>,
-    mut windows: Query<&mut CursorOptions, With<PrimaryWindow>>,
-) {
-    if keys.just_pressed(KeyCode::Tab) {
-        menu.open = !menu.open;
-        set_cursor_grab(!menu.open, &mut windows);
+/// Say what the app wants the worker to build: the model the highlight resolves to, and — while the
+/// menu is open — the ones a step away, so a preview never waits for a cold build.
+fn stream_models(mut loader: ResMut<ModelLoader>, menu: Res<menu::Menu>, model: Res<Model>) {
+    loader.collect();
+    if model.player.is_none() {
         return;
     }
-    if !menu.open {
-        return;
+    let shown = model.shown.as_ref();
+    if let Some(key) = menu.key()
+        && shown != Some(&key)
+    {
+        loader.request(key, false);
     }
-    if keys.just_pressed(KeyCode::Escape) {
-        menu.open = false;
-        set_cursor_grab(true, &mut windows);
-        return;
-    }
-    if keys.just_pressed(KeyCode::ArrowLeft) {
-        menu.column = (menu.column + 3) % 4;
-    }
-    if keys.just_pressed(KeyCode::ArrowRight) {
-        menu.column = (menu.column + 1) % 4;
-    }
-    if menu.characters.is_empty() {
-        return;
-    }
-    let up = keys.just_pressed(KeyCode::ArrowUp);
-    let down = keys.just_pressed(KeyCode::ArrowDown);
-    if up || down {
-        let column = menu.column;
-        menu.step(column, up);
-    }
-    menu.clamp();
-    if keys.just_pressed(KeyCode::Enter) && menu.skin().is_some() {
-        menu.requested = true;
-        menu.open = false;
-        set_cursor_grab(true, &mut windows);
+    if menu.open {
+        for key in menu.prefetch_keys() {
+            if shown != Some(&key) {
+                loader.request(key, true);
+            }
+        }
     }
 }
 
-/// Rebuild the model when a new skin is confirmed.
-fn rebuild_model(
+/// Put the model the highlight resolves to on the character, once the worker has built it. The
+/// model on screen stays until its replacement is ready, so a preview never blinks to nothing.
+fn apply_model(
     mut commands: Commands,
-    mut menu: ResMut<Menu>,
+    menu: Res<menu::Menu>,
     mut model: ResMut<Model>,
+    mut loader: ResMut<ModelLoader>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut inverse_bindposes: ResMut<Assets<SkinnedMeshInverseBindposes>>,
 ) {
-    if !menu.requested {
-        return;
-    }
-    menu.requested = false;
-    let (Some(player), Some(resolved)) = (model.player, menu.resolved()) else {
+    let Some(key) = menu.key() else {
         return;
     };
+    if model.shown.as_ref() == Some(&key) {
+        return;
+    }
+    let (Some(player), Some(_)) = (model.player, model.root) else {
+        return;
+    };
+    let Some(assets) = loader.take(&key) else {
+        return;
+    };
+    // A new model replaces the old one whole, so the animator goes with it and the loader rebuilds
+    // it from the new clips.
     if let Some(root) = model.root.take() {
         commands.entity(root).despawn();
     }
     commands.entity(player).remove::<Animator>();
-    let name = menu.character().map(|c| c.name.clone()).unwrap_or_default();
-    info!(
-        "skin: {name} {}",
-        menu.skin().map(|s| s.label.clone()).unwrap_or_default()
-    );
-    match build_character(&resolved) {
-        Ok(assets) => {
-            // Applied successfully, so remember it for the next run.
-            if let Err(error) = menu.saved().save() {
-                warn!("could not save the selection ({error:#})");
-            }
-            model.root = Some(spawn_model(
-                &mut commands,
-                &mut meshes,
-                &mut images,
-                &mut materials,
-                &mut inverse_bindposes,
-                player,
-                assets,
-            ));
-        }
-        Err(error) => warn!("could not load {} ({error:#})", resolved.body),
-    }
+    info!("model: showing {}", key.label());
+    model.root = Some(spawn_model(
+        &mut commands,
+        &mut meshes,
+        &mut images,
+        &mut materials,
+        &mut inverse_bindposes,
+        player,
+        assets,
+    ));
+    model.shown = Some(key);
 }
 
-/// Draw the menu overlay: characters, body skins, head variants and faces, one column per list.
-fn draw_menu(menu: Res<Menu>, mut texts: Query<&mut Text, With<MenuText>>) {
-    let Ok(mut text) = texts.single_mut() else {
-        return;
-    };
-    if !menu.open {
-        if !text.0.is_empty() {
-            text.0.clear();
-        }
+/// Remember the selection when the player confirms it. The highlight is previewed freely; only a
+/// confirmation is written, so a walk through the list does not rewrite the file at every step.
+fn save_selection(mut menu: ResMut<menu::Menu>) {
+    if !menu.requested {
         return;
     }
-    let column = |index: usize, values: Vec<String>| -> Vec<String> {
-        values
-            .into_iter()
-            .enumerate()
-            .map(|(i, label)| {
-                format!(
-                    "{} {}",
-                    if menu.column == index && i == menu.selection()[index] {
-                        '>'
-                    } else {
-                        ' '
-                    },
-                    label
-                )
-            })
-            .collect()
-    };
-    let characters = column(
-        0,
-        menu.characters
-            .iter()
-            .map(|c| format!("{:>3} {}", c.id, c.name))
-            .collect(),
-    );
-    let (skins, heads, faces) = match menu.character() {
-        Some(c) => (
-            column(1, c.skins.iter().map(|s| s.label.clone()).collect()),
-            column(2, c.heads.iter().map(|h| h.label.clone()).collect()),
-            column(3, c.faces.iter().map(|f| f.label.clone()).collect()),
-        ),
-        None => (Vec::new(), Vec::new(), Vec::new()),
-    };
-    let rows = characters
-        .len()
-        .max(skins.len())
-        .max(heads.len())
-        .max(faces.len());
-    let mut lines = vec![format!(
-        "{:<16}{:<14}{:<16}{}",
-        "CHARACTERS", "BODY SKIN", "HEAD", "FACE"
-    )];
-    for i in 0..rows {
-        let get = |v: &Vec<String>| v.get(i).cloned().unwrap_or_default();
-        lines.push(format!(
-            "{:<16}{:<14}{:<16}{}",
-            get(&characters),
-            get(&skins),
-            get(&heads),
-            get(&faces)
-        ));
-    }
-    lines.push(String::new());
-    lines.push("Tab close    left/right column    up/down select    Enter apply".into());
-    let rendered = lines.join("\n");
-    if text.0 != rendered {
-        text.0 = rendered;
+    menu.requested = false;
+    if let Err(error) = menu.saved().save() {
+        warn!("could not save the selection ({error:#})");
     }
 }
 

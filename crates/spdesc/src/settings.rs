@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
+use bevy::audio::{GlobalVolume, Volume};
 use bevy::prelude::*;
 use serde_json::{Map, Value};
 
@@ -40,6 +41,14 @@ pub struct Selection {
 }
 
 impl Selection {
+    /// The four names, for a log line.
+    pub fn describe(&self) -> String {
+        format!(
+            "character {} / skin {} / head {} / face {}",
+            self.character, self.skin, self.head, self.face
+        )
+    }
+
     /// The saved selection, when the config root holds a well-formed one.
     pub fn load() -> Option<Selection> {
         Selection::from_json(&std::fs::read_to_string(path()?).ok()?)
@@ -93,6 +102,14 @@ impl Selection {
 /// `<config-root>/selection.json`.
 fn path() -> Option<PathBuf> {
     document("selection.json")
+}
+
+/// Keep Bevy's own master volume in step with the setting, which every cue obeys.
+pub fn apply_volumes(settings: Res<Settings>, mut volume: ResMut<GlobalVolume>) {
+    let wanted = Volume::Linear(settings.master.clamp(0.0, 1.0));
+    if volume.volume != wanted {
+        volume.volume = wanted;
+    }
 }
 
 /// The sound levels, under the config root beside the selection.

@@ -424,7 +424,7 @@ pub fn debug_progress(
 // parameter list for the same reason (`too_many_arguments` in the workspace lints).
 #[allow(clippy::type_complexity)]
 pub fn draw_progress(
-    menu: Res<crate::Menu>,
+    menu: Res<crate::menu::Menu>,
     time: Res<Time>,
     career: ResMut<Career>,
     insignia: Res<Insignia>,

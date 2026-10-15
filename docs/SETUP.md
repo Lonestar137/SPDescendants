@@ -154,12 +154,13 @@ sounds), run inside `nix-shell`:
 cargo play
 ```
 
-`Tab` opens/closes the selection menu. Use left/right to choose the character, body-skin, head, or
-face column; use up/down to change the selection; press `Enter` to apply or `Escape` to close.
-Outside the menu, `WASD` or the arrow keys move, `Shift` sprints, `Space` jumps, the mouse orbits,
-right-click aims, hold left-click to fire, and `R` reloads. `F1` opens the developer menu: the
-level and prestige, a button to reset the prestige, and sliders for the gun-fire and master
-volumes.
+`Tab` opens/closes the menu. It has two pages, swapped with `[` and `]`: **Character**, whose four
+lists (character, body skin, head, face) scroll and preview on the character as they are
+highlighted, and **Developer**, which holds the level and prestige, the buttons for experience and
+prestige, and the gun-fire and master volume sliders. The focused list is the one the arrows walk;
+`PageUp`/`PageDown` jump a page and `Home`/`End` go to the ends. `Enter`, `Escape`, `Tab` or Close
+all apply and close. Outside the menu, `WASD` or the arrow keys move, `Shift` sprints, `Space`
+jumps, the mouse orbits, right-click aims, hold left-click to fire, and `R` reloads.
 
 Run the in-loop checks for a change, and the full gate chain before landing it:
 
