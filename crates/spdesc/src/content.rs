@@ -552,8 +552,15 @@ fn material_for(
     }
 }
 
-/// The material for a face-mesh slot. Only the face skin is decoded (from the makeup folder); the
-/// eyes, teeth and lash/brow cards are flat tints this MVP does not decode.
+/// Every character's eyeball material instantiates these shared base-material eye textures; the
+/// per-race iris colour lives in a material instance this MVP does not decode.
+const SCLERA_PATH: &str =
+    "/M1/Content/BaseMaterials/Character/Material/Eyes/TextureT_Sclera_D.uasset";
+const EYE_NORMAL_PATH: &str =
+    "/M1/Content/BaseMaterials/Character/Material/Eyes/TextureT_Eye_N.uasset";
+
+/// The material for a face-mesh slot. The face skin is decoded from the makeup folder and the
+/// eyeball from the shared sclera; the teeth and lash/brow cards are flat tints.
 fn face_material(
     data: &mut DataSource,
     makeup_dir: &str,
@@ -561,6 +568,29 @@ fn face_material(
     cache: &mut HashMap<String, Maps>,
 ) -> MaterialSpec {
     let s = slot.to_ascii_lowercase();
+    // The eyeball's sclera is a shared base-material texture (the iris colour is a per-makeup
+    // parameter this MVP cannot read, so the iris stays a flat tint).
+    if s.contains("eyeball") {
+        let key = format!("{SCLERA_PATH}|sclera");
+        let maps = cache
+            .entry(key)
+            .or_insert_with(|| Maps {
+                base: data.texture(SCLERA_PATH).ok(),
+                normal: data.texture(EYE_NORMAL_PATH).ok(),
+                packed: None,
+            })
+            .clone();
+        if maps.base.is_some() {
+            return MaterialSpec {
+                base: maps.base,
+                packed: None,
+                normal: maps.normal,
+                tint: [1.0, 1.0, 1.0, 1.0],
+                roughness: 0.15,
+                metallic: 0.0,
+            };
+        }
+    }
     let keywords: &[&str] = if s.contains("face") {
         &["face", "makeup"]
     } else {
@@ -586,9 +616,9 @@ fn face_material(
     let (tint, roughness) = if s.contains("lash") || s.contains("brow") || s.contains("tear") {
         ([0.05, 0.04, 0.04, 1.0], 0.6)
     } else if s.contains("eye") || s.contains("occ") {
-        // The iris colour is a material-instance parameter we cannot read, so a dark iris stands
-        // in; white eyeballs read as blank.
-        ([0.16, 0.13, 0.12, 1.0], 0.2)
+        // The iris colour is a material-instance parameter we cannot read, so a brown iris stands
+        // in; a near-black card over the sclera reads as blank, closed eyes.
+        ([0.34, 0.25, 0.17, 1.0], 0.2)
     } else if s.contains("teeth") {
         ([0.90, 0.90, 0.88, 1.0], 0.3)
     } else {
@@ -758,6 +788,12 @@ fn build_parts(
             .get(section.material_index.max(0) as usize)
             .map(|m| m.slot_name.clone())
             .unwrap_or_else(|| format!("slot{}", section.material_index));
+        // The eye-occlusion card is a blended overlay the game composites over the eyeball; with
+        // its material instance undecoded we would draw it opaque and hide the eye, so it is left
+        // out. The lash/brow cards are drawable as flat cards and stay.
+        if attach == Attach::Face && slot.to_ascii_lowercase().contains("occ") {
+            continue;
+        }
         let key = format!("{material_dir}|{slot}");
         let material = match material_of_slot.get(&key) {
             Some(i) => *i,
