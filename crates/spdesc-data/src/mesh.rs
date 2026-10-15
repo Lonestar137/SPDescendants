@@ -435,7 +435,8 @@ fn read_lod(r: &mut Reader, has_vertex_colors: bool, bones: &[Bone]) -> Result<M
     let uv_esz = r.i32()?;
     let uv_count = r.i32()?;
     let uv_bytes = if full_precision_uvs { 8 } else { 4 };
-    if uv_esz != uv_bytes * num_tex_coords {
+    // The bulk's element size is one UV channel (the array holds `num_tex_coords` per vertex).
+    if uv_esz != uv_bytes {
         bail!("uv element size {uv_esz}");
     }
     let expected_uv_verts = if uv_count == num_verts2 * num_tex_coords {

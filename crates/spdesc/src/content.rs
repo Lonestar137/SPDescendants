@@ -408,19 +408,29 @@ struct Maps {
 }
 
 /// The file-name fragments that identify a slot's textures, in the order they are tried. Glass and
-/// hair have no decoded maps (they are flat tints), so they want no fragments.
+/// hair have no decoded maps (they are flat tints), so they want no fragments. Slot names vary a
+/// lot between characters (`PartA`, `part_a`, `MI_…_A`), so the trailing token counts too.
 fn slot_keywords(slot: &str) -> &'static [&'static str] {
     let s = slot.to_ascii_lowercase();
+    let last = s.rsplit('_').next().unwrap_or("");
     if s.contains("glass") || s.contains("hair") || s.contains("fur") {
         &[]
     } else if s.contains("helmet") {
         &["helmet"]
-    } else if s.contains("part_a") || s.contains("parta") || s.contains("part a") {
+    } else if last == "head" || s.contains("face") {
+        &["head", "helmet"]
+    } else if s.contains("part_a") || s.contains("parta") || last == "a" {
         &["parta", "part_a"]
-    } else if s.contains("part_b") || s.contains("partb") || s.contains("part b") {
+    } else if s.contains("part_b") || s.contains("partb") || last == "b" {
         &["partb", "part_b"]
+    } else if last == "c" {
+        &["partc", "part_c"]
+    } else if last == "d" {
+        &["partd", "part_d"]
+    } else if s.contains("cloth") {
+        &["parta", "part_a"]
     } else if s.contains("head") {
-        &["head"]
+        &["head", "helmet"]
     } else if s.contains("skin") || s.contains("body") {
         &["body", "skin"]
     } else {
@@ -500,6 +510,10 @@ fn material_for(
         // The braid's colour comes from a hair material this MVP does not decode, so a brown,
         // semi-glossy neutral stands in.
         ([0.26, 0.16, 0.11, 1.0], 0.45, 0.0)
+    } else if s.contains("skin") || s.contains("body") {
+        // A bare-body slot whose skin texture is not in this skin's folder: a skin tone reads
+        // better than the neutral grey the exposed flesh would otherwise get.
+        ([0.74, 0.57, 0.47, 1.0], 0.8, 0.0)
     } else {
         ([0.6, 0.55, 0.5, 1.0], 0.6, 0.0)
     };
@@ -1018,11 +1032,14 @@ mod tests {
             ["parta", "part_a"]
         );
         assert_eq!(slot_keywords("PC_001_A_MF_001_part_b"), ["partb", "part_b"]);
+        assert_eq!(slot_keywords("PC_016_U_CMN_001_A"), ["parta", "part_a"]);
+        assert_eq!(slot_keywords("PC_016_U_CMN_001_B"), ["partb", "part_b"]);
         assert_eq!(
             slot_keywords("PC_004_U_CMN_BODY_001_Skin"),
             ["body", "skin"]
         );
-        assert_eq!(slot_keywords("PC_001_A_MF_001_Head"), ["head"]);
+        assert_eq!(slot_keywords("PC_001_A_MF_001_Head"), ["head", "helmet"]);
+        assert_eq!(slot_keywords("PC_016_U_CMN_001_HEAD"), ["head", "helmet"]);
         assert_eq!(slot_keywords("PC_004_U_CMN_HEAD_001_Helmet"), ["helmet"]);
         assert!(slot_keywords("PC_004_U_CMN_HEAD_001_Hair").is_empty());
         assert!(slot_keywords("PC_004_U_CMN_BODY_001_GlassA").is_empty());
