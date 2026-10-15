@@ -44,7 +44,8 @@ pub enum Attach {
     Body,
     /// A sub-mesh of the head attach node (the head and hair).
     Head,
-    /// A static sub-mesh of the face attach node (the separate face mesh).
+    /// A sub-mesh of the separate face mesh: a head/neck/chest bust skinned to the body skeleton
+    /// and laid out in body model space, alongside the body parts.
     Face,
 }
 
@@ -74,14 +75,22 @@ pub struct CharacterAssets {
     /// bone. The head mesh is authored in model space, so the node's bind rotation cancels the
     /// bone's orientation; the head then follows the head bone's motion without twisting.
     pub head_attach: Option<(usize, Transform)>,
-    /// The face attach node: the head bone it follows and the transform that puts the face mesh
-    /// (authored in body model space) back where it was authored. `None` when the character has no
-    /// separate face mesh.
-    pub face_attach: Option<(usize, Transform)>,
+    /// The separate face mesh's skinning, when the character has one.
+    pub face: Option<FaceSkin>,
     /// Vertical (Bevy `+Y`) offset, in metres, that puts the model's lowest point at zero.
     pub feet_offset: f32,
     /// Locomotion clips `[idle, walk, run]` and the bone↔track mapping, when the data resolves.
     pub animation: Option<Animation>,
+}
+
+/// The separate face mesh: a full head/neck/upper-chest bust authored in body model space and
+/// skinned to the body skeleton, so its neck and chest follow the spine and neck bones instead of
+/// riding the head bone (which would tear it away from the body's shoulders when the head moves).
+pub struct FaceSkin {
+    /// The face mesh's inverse bind poses, in body model space.
+    pub inverse_bindposes: Vec<Mat4>,
+    /// Face bone → body bone index, by name.
+    pub joints: Vec<usize>,
 }
 
 /// Locomotion clips and how their tracks map onto the mesh's bones.
@@ -667,21 +676,10 @@ pub fn load_character(
         )
     });
 
-    // The face is a separate mesh authored in *body* model space (its vertices sit at head height),
-    // so an attach node carrying the inverse of the head bone's bind transform puts it back exactly
-    // where it was authored and keeps it following the head.
+    // The face is a separate mesh authored in *body* model space (its vertices sit at head height)
+    // and skinned to the body skeleton, so it is drawn with the body's bones rather than pinned to
+    // the head.
     let face = face_mesh_path(body_path).and_then(|path| data.mesh(&path, "").ok());
-    let face_attach = head_world.map(|world| {
-        let (scale, rotation, translation) = world.inverse().to_scale_rotation_translation();
-        (
-            head_index.unwrap(),
-            Transform {
-                translation,
-                rotation,
-                scale,
-            },
-        )
-    });
 
     let mut materials: Vec<MaterialSpec> = Vec::new();
     let mut material_of_slot: HashMap<String, usize> = HashMap::new();
@@ -715,6 +713,7 @@ pub fn load_character(
         &mut material_of_slot,
         &mut parts,
     )?;
+    let mut face_skin = None;
     if let Some(face) = &face {
         let dir = face_material_dir
             .map(str::to_string)
@@ -724,13 +723,23 @@ pub fn load_character(
             face,
             Attach::Face,
             &dir,
-            false,
+            true,
             &mut ignored_feet,
             &mut cache,
             &mut materials,
             &mut material_of_slot,
             &mut parts,
         )?;
+        let face_skeleton = build_skeleton(face);
+        let joints = face_skeleton
+            .names
+            .iter()
+            .map(|name| skeleton.names.iter().position(|n| n == name).unwrap_or(0))
+            .collect();
+        face_skin = Some(FaceSkin {
+            inverse_bindposes: face_skeleton.inverse_bindposes,
+            joints,
+        });
     }
     if parts.is_empty() {
         bail!("the character meshes have no renderable sections");
@@ -743,7 +752,7 @@ pub fn load_character(
         skeleton,
         head_skeleton: build_skeleton(&head),
         head_attach,
-        face_attach,
+        face: face_skin,
         feet_offset,
         animation,
     })
@@ -1153,6 +1162,43 @@ mod tests {
         assert_eq!(a.clips[a.jump].num_samples, 31, "JumpStart");
         assert_eq!(a.clips[a.air].num_samples, 61, "JumpLoop");
         assert_eq!(a.clips[a.land].num_samples, 44, "JumpLandHard");
+    }
+
+    /// The face is a head/neck/chest bust skinned to the body skeleton, so its neck follows the
+    /// neck and spine rather than riding the head bone. Every face bone resolves to a body bone and
+    /// the face sections carry joint data.
+    #[test]
+    fn face_bust_is_skinned_to_the_body() {
+        let Some(assets) = build_or_skip() else {
+            return;
+        };
+        let face = assets
+            .face
+            .as_ref()
+            .expect("Bunny ships a separate face mesh");
+        assert_eq!(face.joints.len(), face.inverse_bindposes.len());
+        assert!(
+            face.joints.len() > 100,
+            "the face mesh is skinned to the body skeleton, got {} bones",
+            face.joints.len()
+        );
+        let head = assets
+            .skeleton
+            .names
+            .iter()
+            .position(|n| n == "Bip001-Head")
+            .expect("the body has a head bone");
+        assert!(
+            face.joints.contains(&head),
+            "a face bone must map to the body's head bone"
+        );
+        assert!(
+            assets
+                .parts
+                .iter()
+                .any(|p| p.attach == Attach::Face && p.skinned),
+            "the face sections must be skinned"
+        );
     }
 
     /// The head skeleton carries the braid chains the hair dynamics find by name; if the data ever

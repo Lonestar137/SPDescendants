@@ -414,7 +414,7 @@ fn spawn_model(
         skeleton,
         head_skeleton,
         head_attach,
-        face_attach,
+        face,
         feet_offset,
         animation,
     } = assets;
@@ -564,17 +564,22 @@ fn spawn_model(
             .entity(node)
             .insert(Hair::new(&head_skeleton, head_bones));
     }
-    // The separate face mesh, static on its own attach node (which follows the head bone).
-    if let Some((index, local)) = face_attach {
-        let node = commands
-            .spawn((local, Visibility::default(), ChildOf(bones[index])))
-            .id();
-        commands.entity(node).with_children(|parent| {
+    // The separate face mesh: a head/neck/chest bust skinned to the *body* skeleton, so it sits in
+    // body model space with the body parts and its neck follows the neck and spine bones.
+    if let Some(face) = face {
+        let face_inverse =
+            inverse_bindposes.add(SkinnedMeshInverseBindposes::from(face.inverse_bindposes));
+        let face_joints: Vec<Entity> = face.joints.iter().map(|&bone| bones[bone]).collect();
+        commands.entity(root).with_children(|parent| {
             for part in face_parts {
                 parent.spawn((
                     Mesh3d(meshes.add(part.mesh)),
                     MeshMaterial3d(handles[part.material].clone()),
-                    Transform::default(),
+                    Transform::from_xyz(0.0, feet_offset, 0.0),
+                    SkinnedMesh {
+                        inverse_bindposes: face_inverse.clone(),
+                        joints: face_joints.clone(),
+                    },
                 ));
             }
         });
