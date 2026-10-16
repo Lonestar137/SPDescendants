@@ -62,9 +62,11 @@ screen.
 
 **The practice targets stand on the project's own arena and nowhere else.** An imported map is
 played without them, because a target is something this project put there rather than something a
-map expects. Nothing else about an imported map is read yet — its geometry is not parsed, so the
-ground is the project's own arena with that map's name on it; `docs/research/MW2-MAPS.md` records
-what is and is not read.
+map expects. Its world surfaces stand as a mesh, grouped by material and shown with a colour per
+material, placed on the collision hull's walkable ground; the game's own textures, lightmaps, and
+material appearance remain to be read. A Modern Warfare 2 world unit is an inch, so the map is
+drawn at its own scale rather than the centimetre one the player works in.
+[`docs/research/MW2-MAPS.md`](docs/research/MW2-MAPS.md) records what is and is not read.
 
 Each target pays experience — a hit is worth 10 and a kill 100 — against Modern Warfare 2's own
 rank table, so the bottom-left panel shows the level, the rank insignia, and how far the next rank

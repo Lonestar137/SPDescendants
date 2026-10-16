@@ -72,65 +72,41 @@ The zones also hold the collision the player walks on (`clipmap`) and the map's 
 (`material`: the compass, the objective icons). The materials the *world's surfaces* name are not
 among them — resolving those is reading the surface array itself, which is the next step.
 
-## How a world's surfaces divide the index buffer
+## How a world's surfaces address the vertex pool
 
-The world's surface array is 32-byte entries in the virtual block. Two of its words were established
-from the data rather than from a remembered struct:
+The world's surface array is 32-byte entries in the virtual block. Its relevant fields are:
 
-- **A material pointer at `+16`** — a virtual-block pointer in 5911 of 5911 surfaces of `mp_rust`.
-- **A first index at `+12`** — the runs taken in that order tile the index buffer exactly, from 0 to
-  the index count, and **every run is a whole number of triangles**. A partition derived from
-  anything but the real first indices would not come out that way; the run *lengths* are therefore
-  each surface's first index minus the next one's, and the last run ends at the index count.
+- **`+4`, `firstVertex`** — the base in the shared world-vertex pool;
+- **`+8`/`+10`, vertex/triangle counts** — the low/high halves respectively;
+- **`+12`, `baseIndex`** — the first u16 index in the shared index buffer; and
+- **`+16`, material** — a virtual-block pointer (present in 5,911 of 5,911 `mp_rust` surfaces).
 
-Measured: `mp_rust` is 5 911 surfaces over **76 materials**, and `mp_estate` 8 292 surfaces over
-**222**, each run 1 to 128 triangles. That is the grouping a render needs, and it also answers what
-the earlier section left open: the world's materials are named by its surfaces, and there are
-hundreds of them, not the nine material *assets* the map zone itself carries.
+The `baseIndex` runs tile the index buffer exactly, from zero to its end, and every run is a whole
+number of triangles. More importantly, each u16 index in a run is **local**: its vertex is
+`firstVertex + index`. In `mp_rust`, the first-vertex ranges partition the 235,386-record vertex pool
+and every raw index fits its surface's vertex count. `vertexLayerData` at `+0` belongs to the separate
+vertex-layer stream; it does not offset positions.
 
-**Not established: how a run addresses its vertices.** A surface's `+4` word is too small to be the
-run's first vertex in most surfaces, and using it as one produces a world extent of about a
-kilometre, which is not a map. The vertex pool is also about four times the largest index in the
-buffer, which fits the vertex-layer scheme the world's own `vertexLayerData` field implies. That,
-and the position offset inside the 44-byte world vertex, is what a render needs next.
+The independent check is the authored 24-byte bounds record beside each surface. It stores a midpoint
+and half-size, so every resolved triangle vertex must lie inside it. The data-gated test in
+`crates/spdesc-mw2/src/world.rs` verifies every index on `mp_rust`, `mp_subbase`, `mp_estate`, and
+`mp_terminal` that the install ships (with 0.1 cm float tolerance). Direct indexing fails that check;
+adding `firstVertex` passes it for every checked index.
 
 ## The drawn world
 
-A map's drawn geometry reads too. A surface states its **first index** at `+12` and its **triangle
-count** as the high half of the word at `+8` — the low half is the world's own vertex count, which
-every surface repeats. Measured against `mp_rust`: 5 911 surfaces, no two sharing a first index, no
-run disagreeing with the count it states, and the counts covering the index buffer exactly
-(579 864 of 579 864). The runs read earlier by taking each run's end from the next one's start were
-right for the same reason — the counts confirm them.
+A vertex is 44 bytes and its position is the first three floats. `read_world` resolves every
+surface-local index to the shared pool before returning the mesh, and the app now stands that drawn
+world. The clipmap remains the source of the walkable-ground anchor, not the visual mesh.
 
-A vertex is 44 bytes and its position is the first three floats.
+The earlier collision-box test was the wrong invariant. A clipmap is the playable collision hull,
+while the drawn world also contains non-collision geometry; their global extents therefore differ.
+Per-surface authored bounds check the exact relationship the renderer needs without assuming that the
+visual world and collision hull have the same outer box.
 
-**The vertex addressing is not solved, and a wrong guess draws a tangle.** In play, the drawn world
-came out as a scrambled mesh with fragments of the real map in it. Measuring why: with the world
-addressed directly from the index values, the geometry spans about 55 × 89 × 12 m on `mp_subbase`
-where the collision — read from a layout known good, and the same space — spans 200 × 290 × 28 m.
-The ratio is about 3.6, and the vertex pool is about four times the largest index in the buffer
-(235 386 against 58 496), so the read is reaching roughly a quarter of the pool: the map's vertices
-are not laid out in index order, and something — a per-surface base, or the vertex *layers* the
-world's own `vertexLayerData` field implies — has to be applied and is not.
-
-Two candidates were measured against the collision's box and both are wrong. Addressing directly from
-the index values gives a world about a quarter the size — the pool is four times the largest index in
-the buffer. Offsetting by the surface's `+4` word — which rises with the surface (64 519, 122 938,
-187 702 down `mp_subbase`'s array against a pool of 259 175, exactly what a pool laid out surface by
-surface looks like) — gives one about three times too large. The truth is between the two, and the
-fact that `+4` rises monotonically is the strongest clue left: the mapping is something else, either
-a stride over the pool or the vertex layers the world's `vertexLayerData` field implies.
-
-The check that will settle it is stated in `crates/spdesc-mw2/src/world.rs` as an ignored test: a
-map's collision is generated from what it draws, so the two occupy the same space and their boxes
-must agree to within a little. It fails today, which is why it is ignored rather than deleted — it is
-the target, not a passing property.
-Until this is solved, the app stands the *collision* — which reads whole, is the map's own shape,
-and is what the player walks on — rather than the drawn world.
-
-Measured, the drawn world is bigger than the collision, as it should be: `mp_subbase` is 196 275
-triangles over 308 × 311 × 86 m, `mp_estate` 219 239 over a manor and its grounds.
+Measured: `mp_rust` is 5,911 surfaces over **76 materials**, and `mp_estate` 8,292 surfaces over
+**222**; each run has 1 to 128 triangles. That is the grouping a renderer needs, and it shows that
+the world's materials are named by its surfaces, not by the few map-level HUD material assets.
 
 ### Where a map stands
 
@@ -143,28 +119,47 @@ Standing a map on its lowest point instead leaves any map with low ground at all
 stairwell, a water channel — with its floors in the air above the player's feet, which is exactly
 what it looked like in play before this.
 
+## The unit: an inch, not a centimetre
+
+A Modern Warfare 2 world unit is the engine's own — an **inch** — where The First Descendant works
+in centimetres. The measure that settles it is the map's own doorways: histogramming near-vertical
+collision edges (walls, door frames, ceilings) on `mp_terminal` puts a clear peak at **80–88
+units**, and a Call of Duty doorway is 80 units. That is 2.0 m only as inches; as centimetres it is
+80 cm, shorter than the player. Drawing a map at 0.01 m per unit therefore shrank the world to about
+39% of its size, which is exactly why the player looked too big for it.
+
+Every map position the app draws or places is converted with that unit
+(`spdesc::content::mw2_to_bevy`), so the drawn world and the walkable-ground anchor agree with the
+player's own centimetre frame.
+
 ## The collision, which reads whole
 
-The clipmap is the one part of a map's *space* the vendored reader already captures completely: a
-vertex pool of 12-byte records that are three floats, and triangle indices that are u16. Nothing has
-to be guessed, so a map's collision reads straight out and stands in the world as one mesh.
+The clipmap is the map's collision hull: a vertex pool of 12-byte records that are three floats, and
+triangle indices that are u16. Nothing has to be guessed, so it reads straight out. It supplies the
+walkable-ground anchor for the drawn-world mesh.
 
 | map | vertices | triangles | walkable | spans |
 | --- | --- | --- | --- | --- |
-| `mp_rust` | 43 489 | 68 408 | 17 584 | 598 × 923 × 35 m |
-| `mp_estate` | 43 912 | 75 511 | 17 757 | 228 × 221 × 47 m |
-| `mp_terminal` | 42 679 | 70 919 | 15 354 | 319 × 321 × 9 m |
+| `mp_rust` | 43 489 | 68 408 | 17 584 | 1 519 × 2 344 × 90 m |
+| `mp_estate` | 43 912 | 75 511 | 17 757 | 580 × 561 × 120 m |
+| `mp_terminal` | 42 679 | 70 919 | 15 354 | 810 × 815 × 22 m |
 
-Those are the map's own shapes: Terminal is a flat 9 metres tall, Estate a manor and its grounds.
-It is the collision hull rather than the drawn world — no props, no detail, and the faces are wound
-outward, so a camera inside reads the back of every wall — but it is the map, and it is what the
-player will walk on.
+The spans are the whole hull, which includes far-flung geometry; the ground the player actually
+walks on is the map's playable shape, measured above in units rather than by its outer box. They are
+a collision hull rather than the drawn world — no props or material detail — which is why they are
+used for placement rather than displayed in place of the world surfaces.
 
 ## What is not read
 
-- **Not the drawn world.** A map's *surfaces* — the geometry with the materials and lightmaps that
-  make it look like a place — are read as runs (above) but not yet built as meshes. What stands in
-  the world is the collision hull: the map's shape, untextured.
+- **Not material appearance.** The drawn-world mesh stands, grouped into one mesh per material, and
+  each material is shown with a colour of its own so the surfaces can be told apart. The game's own
+  images are not applied. The reason is a property of the fastfiles rather than a missing decoder:
+  a map zone ships **no image assets at all** (`mp_rust` is 480 assets — a world, a clipmap, 245
+  technique sets, 50 models, 143 sounds — and zero `image`), and its world's material bodies are not
+  among the listed assets either (10 `material` assets, all HUD: the compass and the head icons).
+  The world's 76 materials are addressed from another zone and resolved by the game's own linker, so
+  reading them means loading the shared zones and emulating that resolution. The colour-per-material
+  look is the interim that makes the world legible until then.
 - **No localised titles.** `localized_*` zones carry no string table the zone walk captures, so
   `PATCH_VACANT` cannot yet be resolved to whatever the game's own text says. The key is kept on the
   entry (`title_key`) for the day it can.

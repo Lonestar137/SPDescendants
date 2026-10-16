@@ -207,7 +207,7 @@ mod tests {
             largest < clip.positions.len(),
             "an index leaves the vertex pool"
         );
-        // Positions are centimetres: a map is hundreds of metres, not kilometres and not nothing.
+        // Positions are the engine's own unit, an inch: a map is hundreds of metres, not kilometres and not nothing.
         let (min, max) = clip.extent();
         for axis in 0..3 {
             let span = max[axis] - min[axis];
@@ -260,46 +260,58 @@ mod tests {
         );
     }
 
-    /// The invariant the drawn world's addressing must satisfy, and does not yet.
+    /// Every drawn-world triangle stays inside its surface's authored bounds.
     ///
-    /// A map's collision is generated from what it draws, so the two occupy the same space: their
-    /// boxes must agree, axis by axis, to within a little. This is the check that says whether a
-    /// surface's vertex indices address the pool correctly — a wrong addressing scatters the
-    /// triangles and the drawn world comes out a fraction of the collision's size, or several times
-    /// larger. It is ignored because the addressing is unsolved and this states the target rather
-    /// than a passing property; it is not a test that should be turned on until it holds.
-    ///
-    /// Measured while getting here: addressing directly from the index values gives a world about a
-    /// quarter the size of the collision — the pool is four times the largest index in the buffer —
-    /// and offsetting by the surface's `+4` word gives one about three times too large. Neither is
-    /// right, so the mapping is something else: a stride, or the vertex layers `vertexLayerData`
-    /// implies.
+    /// The world contains non-collision geometry, so its overall extent need not match the clipmap.
+    /// Surface bounds are independent records stored alongside the surfaces. They prove that each
+    /// run's u16 indices are resolved through its `firstVertex` at `+4`, rather than read directly
+    /// from the shared vertex pool.
     #[test]
-    #[ignore]
-    fn the_drawn_world_occupies_the_same_space_as_its_collision() {
+    fn drawn_world_indices_resolve_inside_their_surface_bounds() {
         let Some(install) = spdesc_game_core::mw2_data() else {
             spdesc_game_core::MW2.skip("no MW2_DATA folder found");
             return;
         };
-        let path = crate::zone_path(&install, "mp_rust");
-        if !path.is_file() {
-            spdesc_game_core::MW2.skip("the install does not ship mp_rust");
-            return;
-        }
-        let image = crate::open_zone(&path).expect("the map zone opens");
-        let world = read_world(&image).expect("the world reads");
-        let clip = read_clip(&image).expect("the collision reads");
-        let (wmin, wmax) = world.extent();
-        let (cmin, cmax) = clip.extent();
-        for axis in 0..3 {
-            let drawn = wmax[axis] - wmin[axis];
-            let solid = cmax[axis] - cmin[axis];
-            let ratio = drawn / solid.max(1.0);
-            assert!(
-                (0.6..1.6).contains(&ratio),
-                "axis {axis}: the world spans {drawn:.0} cm where its collision spans {solid:.0} \
-                 (ratio {ratio:.2}), so the vertex indices do not address the pool"
+        let mut tested = 0;
+        for map in ["mp_rust", "mp_subbase", "mp_estate", "mp_terminal"] {
+            let path = crate::zone_path(&install, map);
+            if !path.is_file() {
+                continue;
+            }
+            let image = crate::open_zone(&path).expect("the map zone opens");
+            let world = read_world(&image).expect("the world reads");
+            let mut checked = 0;
+            for run in &world.runs {
+                let (min, max) = run.bounds.expect("every surface has bounds");
+                let end = run.first.saturating_add(run.count);
+                let indices = world
+                    .indices
+                    .get(run.first..end)
+                    .expect("a surface run stays inside the index buffer");
+                for index in indices {
+                    let position = world
+                        .positions
+                        .get(*index as usize)
+                        .expect("a resolved index stays inside the vertex pool");
+                    assert!(
+                        (0..3).all(|axis| {
+                            min[axis] - 0.1 <= position[axis] && position[axis] <= max[axis] + 0.1
+                        }),
+                        "{map}: surface at index {} addresses {position:?} outside {min:?}..{max:?}",
+                        run.first
+                    );
+                    checked += 1;
+                }
+            }
+            assert_eq!(
+                checked,
+                world.indices.len(),
+                "{map}: every index was checked"
             );
+            tested += 1;
+        }
+        if tested == 0 {
+            spdesc_game_core::MW2.skip("the install ships none of the measured map zones");
         }
     }
 
@@ -411,14 +423,17 @@ impl fastfile_iw4::AssetLinkSink for Ignore {
 /// tile the index buffer exactly, and **every run is a whole number of triangles** — a partition
 /// derived from anything but the real first indices would not be.
 ///
-/// What is *not* established is how a run addresses its vertices: a surface's `+4` is too small to
-/// be the run's first vertex in most surfaces, and reading the pool with it produces an extent of
-/// about a kilometre, which is not a map. The pool is also about four times the size of the largest
-/// index, which fits the vertex-layer scheme the world's own `vertexLayerData` implies. Resolving
-/// that is the next step; this reads the runs and their materials, which is what a render needs to
-/// group its triangles.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Each run's indices are local to its first vertex. The word at `+4` is that base, so adding it to
+/// every index in the run resolves the shared vertex pool. The word at `+0` is instead the offset
+/// into the separate vertex-layer stream; it does not address the positions.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurfaceRun {
+    /// The byte offset into the separate vertex-layer stream for this surface.
+    pub vertex_layer_data: u32,
+    /// The first vertex this run's u16 indices address in the world's shared vertex pool.
+    pub first_vertex: u32,
+    /// How many vertices this surface exposes to the renderer.
+    pub vertex_count: usize,
     /// The first index of the run, in the world's index buffer.
     pub first: usize,
     /// How many indices it draws. Always a multiple of three.
@@ -426,16 +441,20 @@ pub struct SurfaceRun {
     /// The material the surface draws with, as the zone stores the word: it decodes as a pointer
     /// into the virtual block, which is how the walk already follows it.
     pub material: u32,
+    /// The surface's authored bounds, when its world carries them.
+    pub bounds: Option<([f32; 3], [f32; 3])>,
 }
 
 /// How many bytes one surface occupies in the world's surface array.
 const SURFACE_STRIDE: usize = 32;
-/// Where a surface keeps its first index, its triangle count, and the material it draws with.
+/// Where a surface keeps its first vertex, first index, triangle count, and material.
 ///
 /// The count is the *high* half of the word at `+8`: the low half is the world's own vertex count,
 /// which every surface repeats. Measured, the counts and the first indices together cover the index
 /// buffer exactly — 5 911 runs, no surface sharing a first index, and no run disagreeing with the
 /// count it states.
+const SURFACE_FIRST_VERTEX: usize = 4;
+const SURFACE_VERTEX_COUNT: usize = 8;
 const SURFACE_FIRST_INDEX: usize = 12;
 const SURFACE_TRIANGLE_COUNT: usize = 10;
 const SURFACE_MATERIAL: usize = 16;
@@ -446,7 +465,7 @@ const VERTEX_POSITION: usize = 0;
 /// A map's drawn world: the geometry the game renders, with the surfaces that group it.
 #[derive(Clone, Debug, Default)]
 pub struct WorldGeometry {
-    /// Vertex positions, in the game's own units and frame (centimetres, `+Z` up).
+    /// Vertex positions, in the game's own frame (`+X` forward, `+Z` up) and unit (inches).
     pub positions: Vec<[f32; 3]>,
     /// Triangle indices into `positions`, three per triangle.
     pub indices: Vec<u32>,
@@ -460,17 +479,25 @@ impl WorldGeometry {
         self.indices.len() / 3
     }
 
-    /// The box the world occupies, in centimetres.
+    /// The box the drawn triangles occupy, in the map's own units (inches).
+    ///
+    /// The pool can contain vertices which no surface draws, so this follows the resolved triangle
+    /// indices rather than treating every record in the pool as map geometry.
     pub fn extent(&self) -> ([f32; 3], [f32; 3]) {
         let mut min = [f32::MAX; 3];
         let mut max = [f32::MIN; 3];
-        for position in &self.positions {
+        let mut any = false;
+        for index in &self.indices {
+            let Some(position) = self.positions.get(*index as usize) else {
+                continue;
+            };
+            any = true;
             for axis in 0..3 {
                 min[axis] = min[axis].min(position[axis]);
                 max[axis] = max[axis].max(position[axis]);
             }
         }
-        if self.positions.is_empty() {
+        if !any {
             ([0.0; 3], [0.0; 3])
         } else {
             (min, max)
@@ -480,8 +507,8 @@ impl WorldGeometry {
 
 /// Read a map's drawn world: its vertex pool, its triangle list, and the runs that group it.
 ///
-/// A triangle's indices are absolute into the pool — the surface's `+4` word is zero for every
-/// surface seen — and a position is the first three floats of a 44-byte vertex.
+/// The u16 indices in each run are relative to the surface's `firstVertex` at `+4`; they are
+/// resolved to absolute indices here. A position is the first three floats of a 44-byte vertex.
 pub fn read_world(image: &ZoneImage) -> std::result::Result<WorldGeometry, Error> {
     let mut memory = image.memory();
     let mut stream = memory.stream(image.bytes())?;
@@ -512,16 +539,25 @@ pub fn read_world(image: &ZoneImage) -> std::result::Result<WorldGeometry, Error
             ]
         })
         .collect();
-    let indices: Vec<u32> = match world.indices {
+    let runs = read_runs(image)?;
+    let mut indices: Vec<u32> = match world.indices {
         Some(index_ptr) => (0..world.index_count)
             .map(|i| u32::from(stream.u16_at(index_ptr.at(i * 2), 0).unwrap_or(0)))
             .collect(),
         None => Vec::new(),
     };
+    for run in &runs {
+        let Some(indices) = indices.get_mut(run.first..run.first.saturating_add(run.count)) else {
+            continue;
+        };
+        for index in indices {
+            *index = index.saturating_add(run.first_vertex);
+        }
+    }
     Ok(WorldGeometry {
         positions,
         indices,
-        runs: read_runs(image)?,
+        runs,
     })
 }
 
@@ -550,11 +586,34 @@ pub fn read_runs(image: &ZoneImage) -> std::result::Result<Vec<SurfaceRun>, Erro
     let mut runs: Vec<SurfaceRun> = (0..world.surface_count)
         .map(|i| {
             let surface = arr.at(i * SURFACE_STRIDE);
+            let bounds = world.surfaces_bounds.map(|arr| {
+                let bounds = arr.at(i * 24);
+                let midpoint = [
+                    stream.f32_at(bounds, 0).unwrap_or(0.0),
+                    stream.f32_at(bounds, 4).unwrap_or(0.0),
+                    stream.f32_at(bounds, 8).unwrap_or(0.0),
+                ];
+                let half_size = [
+                    stream.f32_at(bounds, 12).unwrap_or(0.0),
+                    stream.f32_at(bounds, 16).unwrap_or(0.0),
+                    stream.f32_at(bounds, 20).unwrap_or(0.0),
+                ];
+                (
+                    [0, 1, 2].map(|axis| midpoint[axis] - half_size[axis]),
+                    [0, 1, 2].map(|axis| midpoint[axis] + half_size[axis]),
+                )
+            });
             SurfaceRun {
+                vertex_layer_data: stream.u32_at(surface, 0).unwrap_or(0),
+                first_vertex: stream.u32_at(surface, SURFACE_FIRST_VERTEX).unwrap_or(0),
+                vertex_count: usize::from(
+                    stream.u16_at(surface, SURFACE_VERTEX_COUNT).unwrap_or(0),
+                ),
                 first: stream.u32_at(surface, SURFACE_FIRST_INDEX).unwrap_or(0) as usize,
                 // The surface states its triangles; three indices each.
                 count: usize::from(stream.u16_at(surface, SURFACE_TRIANGLE_COUNT).unwrap_or(0)) * 3,
                 material: stream.u32_at(surface, SURFACE_MATERIAL).unwrap_or(0),
+                bounds,
             }
         })
         .collect();
@@ -564,7 +623,8 @@ pub fn read_runs(image: &ZoneImage) -> std::result::Result<Vec<SurfaceRun>, Erro
 
 /// Where each surface's material sits, and the vertex base it is addressed with.
 #[doc(hidden)]
-pub const SURFACE_FIELDS: [usize; 3] = [4, SURFACE_FIRST_INDEX, SURFACE_MATERIAL];
+pub const SURFACE_FIELDS: [usize; 3] =
+    [SURFACE_FIRST_VERTEX, SURFACE_FIRST_INDEX, SURFACE_MATERIAL];
 
 /// A map's collision geometry: the triangles a player stands on and walks into.
 ///
@@ -574,7 +634,7 @@ pub const SURFACE_FIELDS: [usize; 3] = [4, SURFACE_FIRST_INDEX, SURFACE_MATERIAL
 /// is missing props and detail, but it is the map's own shape and the player can walk on it.
 #[derive(Clone, Debug, Default)]
 pub struct ClipGeometry {
-    /// Vertex positions, in the game's own units and frame (centimetres, `+Z` up).
+    /// Vertex positions, in the game's own frame (`+X` forward, `+Z` up) and unit (inches).
     pub positions: Vec<[f32; 3]>,
     /// Triangle indices into `positions`, three per triangle.
     pub indices: Vec<u32>,
@@ -634,7 +694,7 @@ impl ClipGeometry {
         })
     }
 
-    /// The box the collision occupies, in centimetres.
+    /// The box the collision occupies, in the map's own units (inches).
     pub fn extent(&self) -> ([f32; 3], [f32; 3]) {
         let mut min = [f32::MAX; 3];
         let mut max = [f32::MIN; 3];

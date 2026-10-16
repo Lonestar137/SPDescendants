@@ -12,6 +12,9 @@
 
 use std::path::PathBuf;
 
+/// One Modern Warfare 2 world unit in metres: the engine's unit is an inch.
+const MW2_METRES_PER_UNIT: f32 = 0.0254;
+
 fn main() -> std::process::ExitCode {
     let mut args = std::env::args().skip(1);
     let mut install: Option<PathBuf> = None;
@@ -117,9 +120,9 @@ fn main() -> std::process::ExitCode {
                      spans {:.0}x{:.0}x{:.0} m",
                     clip.positions.len(),
                     clip.triangle_count(),
-                    (max[0] - min[0]) / 100.0,
-                    (max[1] - min[1]) / 100.0,
-                    (max[2] - min[2]) / 100.0
+                    (max[0] - min[0]) * MW2_METRES_PER_UNIT,
+                    (max[1] - min[1]) * MW2_METRES_PER_UNIT,
+                    (max[2] - min[2]) * MW2_METRES_PER_UNIT
                 );
             }
             Err(error) => println!("  collision: cannot read: {error}"),

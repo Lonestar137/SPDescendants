@@ -13,7 +13,7 @@
 //! The rule about which map carries the practice targets lives in `spdesc-game-core`; this module
 //! only presents it.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, channel};
@@ -23,7 +23,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use spdesc_game_core::{DEV_MAP, GameMap};
-use spdesc_mw2::ClipGeometry;
+use spdesc_mw2::WorldGeometry;
 use spdesc_mw2::{MapEntry, SoundBank, iwd, iwi};
 
 use crate::combat::{self, Enemy};
@@ -238,19 +238,17 @@ pub(crate) fn follow_choice(menu: Res<Menu>, mut chosen: ResMut<ChosenMap>) {
     }
 }
 
-/// The map's own *solid* geometry, standing in the world as one mesh.
+/// The map's own drawn geometry, standing in the world as one mesh.
 ///
-/// This is the collision hull, not the drawn world. The drawn world reads (`spdesc_mw2::read_world`)
-/// but its vertex addressing is not solved: it reaches only about a quarter of the vertex pool, so
-/// what it draws is a quarter of the map's space with the rest scrambled — a tangle with fragments
-/// of detail in it. The collision reads whole and is the map's own shape, so it is what stands.
+/// The collision hull supplies the walkable spawn point; the mesh is the world surfaces themselves.
 #[derive(Component)]
 pub(crate) struct MapGeometry;
 
-/// A map that has been read: its solid geometry.
+/// A map that has been read: its drawn world, and the spot on its walkable ground to stand on.
 struct ArrivedMap {
     id: String,
-    solid: ClipGeometry,
+    world: WorldGeometry,
+    spawn: Option<[f32; 3]>,
 }
 
 /// Maps read off the main thread, because walking a zone takes about half a second.
@@ -305,8 +303,12 @@ pub(crate) fn sync_map_mesh(
             let Ok(image) = spdesc_mw2::open_zone(&path) else {
                 return;
             };
-            if let Ok(solid) = spdesc_mw2::read_clip(&image) {
-                let _ = outbox.send(ArrivedMap { id, solid });
+            let world = spdesc_mw2::read_world(&image);
+            let spawn = spdesc_mw2::read_clip(&image)
+                .ok()
+                .and_then(|clip| clip.spawn());
+            if let Ok(world) = world {
+                let _ = outbox.send(ArrivedMap { id, world, spawn });
             }
         })
         .expect("spawn the map reader");
@@ -330,80 +332,137 @@ pub(crate) fn collect_map_mesh(
             arrived.push(item);
         }
     }
-    for ArrivedMap { id, solid } in arrived {
+    for ArrivedMap { id, world, spawn } in arrived {
         if id != chosen.id || chosen.targets {
             continue;
         }
         for entity in &standing {
             commands.entity(entity).despawn();
         }
-        let spawn = solid.spawn();
-        let (positions, indices, offset) = mesh_data(&solid, spawn);
-        let mut mesh = Mesh::new(
-            bevy::render::mesh::PrimitiveTopology::TriangleList,
-            RenderAssetUsages::default(),
-        );
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-        mesh.insert_indices(bevy::render::mesh::Indices::U32(indices));
-        mesh.compute_normals();
-        let (min, max) = solid.extent();
+        let offset = world_anchor(&world, spawn);
+        let (min, max) = world.extent();
+        // The world draws as one surface run per material, so it is stood as one child per
+        // material. A run's material is the grouping a renderer needs, and until the zone's own
+        // images can be resolved each group gets a colour of its own: distinct enough to tell a
+        // wall from a crate from the ground, which is what makes an untextured map readable.
+        let groups = split_by_material(&world);
+        let unit = crate::content::MW2_METRES_PER_UNIT;
         info!(
-            "map: {id} standing — {} triangles, {:.0}x{:.0}x{:.0} m",
-            solid.triangle_count(),
-            (max[0] - min[0]) / 100.0,
-            (max[1] - min[1]) / 100.0,
-            (max[2] - min[2]) / 100.0
+            "map: {id} standing — {} triangles over {} materials, {:.0}x{:.0}x{:.0} m",
+            world.triangle_count(),
+            groups.len(),
+            (max[0] - min[0]) * unit,
+            (max[1] - min[1]) * unit,
+            (max[2] - min[2]) * unit
         );
-        commands.spawn((
-            MapGeometry,
-            Mesh3d(meshes.add(mesh)),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::srgb(0.55, 0.56, 0.58),
-                perceptual_roughness: 0.9,
-                // Collision is a hull seen from the outside in: its faces are wound outward, so a
-                // camera inside the map reads the back of every wall. Lighting both sides is what
-                // makes the inside a room rather than a silhouette.
-                cull_mode: None,
-                double_sided: true,
-                ..default()
-            })),
-            Transform::from_translation(offset),
-        ));
+        let map = commands
+            .spawn((
+                MapGeometry,
+                Transform::from_translation(offset),
+                Visibility::default(),
+            ))
+            .id();
+        for (material, mesh) in groups {
+            commands.spawn((
+                Mesh3d(meshes.add(mesh)),
+                MeshMaterial3d(materials.add(material_look(material))),
+                Transform::default(),
+                ChildOf(map),
+            ));
+        }
         maps.shown = Some(id);
         maps.reading = None;
     }
 }
 
-/// A world mesh's positions and indices in Bevy space, and the offset that stands it with the spot
-/// the player spawns on at the origin.
+/// Where a map's transform sits in Bevy space, so the spot the player spawns on lands at the
+/// origin where the player already is.
 ///
 /// The offset is taken from the *converted* spawn rather than worked out in game units: the
 /// conversion turns the game's `+Z` up into Bevy's `+Y` up, so anything computed before it has its
 /// vertical axis the wrong way round. Standing the map on its *lowest* point instead would leave a
 /// map with any low ground at all — a valley, a stairwell — with its floor in the air, which is
 /// what the walkable spot avoids.
-fn mesh_data(geometry: &ClipGeometry, spawn: Option<[f32; 3]>) -> (Vec<[f32; 3]>, Vec<u32>, Vec3) {
-    let positions: Vec<[f32; 3]> = geometry
-        .positions
-        .iter()
-        .map(|p| crate::content::to_bevy(*p))
-        .collect();
-    if positions.is_empty() {
-        return (positions, geometry.indices.clone(), Vec3::ZERO);
-    }
-    let anchor = spawn.map(crate::content::to_bevy).unwrap_or_else(|| {
+fn world_anchor(world: &WorldGeometry, spawn: Option<[f32; 3]>) -> Vec3 {
+    let anchor = spawn.map(crate::content::mw2_to_bevy).unwrap_or_else(|| {
         let mut min = [f32::MAX; 3];
         let mut max = [f32::MIN; 3];
-        for position in &positions {
+        for position in &world.positions {
+            let b = crate::content::mw2_to_bevy(*position);
             for axis in 0..3 {
-                min[axis] = min[axis].min(position[axis]);
-                max[axis] = max[axis].max(position[axis]);
+                min[axis] = min[axis].min(b[axis]);
+                max[axis] = max[axis].max(b[axis]);
             }
         }
         [(min[0] + max[0]) / 2.0, min[1], (min[2] + max[2]) / 2.0]
     });
-    let offset = Vec3::new(-anchor[0], -anchor[1], -anchor[2]);
-    (positions, geometry.indices.clone(), offset)
+    Vec3::new(-anchor[0], -anchor[1], -anchor[2])
+}
+
+/// The world's triangles grouped by the material each surface draws with, one mesh per group.
+///
+/// A surface run names the material its triangles draw with, and many runs share one material, so
+/// grouping by it gives the draw units a renderer wants. Each group's positions are remapped into a
+/// compact local range, so a mesh carries only the vertices it uses rather than the whole pool.
+fn split_by_material(world: &WorldGeometry) -> Vec<(u32, Mesh)> {
+    let mut groups: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for run in &world.runs {
+        let end = run.first.saturating_add(run.count).min(world.indices.len());
+        let Some(indices) = world.indices.get(run.first..end) else {
+            continue;
+        };
+        groups
+            .entry(run.material)
+            .or_default()
+            .extend_from_slice(indices);
+    }
+    groups
+        .into_iter()
+        .map(|(material, indices)| {
+            let mut remap: HashMap<u32, u32> = HashMap::new();
+            let mut positions: Vec<[f32; 3]> = Vec::new();
+            let mut local: Vec<u32> = Vec::with_capacity(indices.len());
+            for index in indices {
+                let l = *remap.entry(index).or_insert_with(|| {
+                    let at = world
+                        .positions
+                        .get(index as usize)
+                        .copied()
+                        .unwrap_or([0.0; 3]);
+                    positions.push(crate::content::mw2_to_bevy(at));
+                    (positions.len() - 1) as u32
+                });
+                local.push(l);
+            }
+            let mut mesh = Mesh::new(
+                bevy::render::mesh::PrimitiveTopology::TriangleList,
+                RenderAssetUsages::default(),
+            );
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+            mesh.insert_indices(bevy::render::mesh::Indices::U32(local));
+            mesh.compute_normals();
+            (material, mesh)
+        })
+        .collect()
+}
+
+/// A stand-in look for one material: a colour of its own, so surfaces that draw with different
+/// materials are told apart while the game's own images are not yet read.
+///
+/// The colour comes from the material's own word, so the same material always gets the same colour
+/// across runs, and neighbouring materials — which the world stores next to each other — land on
+/// well-separated hues rather than a random walk.
+fn material_look(material: u32) -> StandardMaterial {
+    let hue = (material.wrapping_mul(2_654_435_761) >> 9) % 360;
+    StandardMaterial {
+        base_color: Color::hsl(hue as f32, 0.45, 0.55),
+        perceptual_roughness: 0.9,
+        // The world has exterior shells and the player starts inside it. Keeping both windings
+        // visible makes a usable untextured map while material rendering lands.
+        cull_mode: None,
+        double_sided: true,
+        ..default()
+    }
 }
 
 /// Show the project's own arena only while the project's own map is the one being played.

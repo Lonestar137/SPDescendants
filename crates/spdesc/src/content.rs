@@ -255,6 +255,24 @@ pub(crate) fn to_bevy(v: [f32; 3]) -> [f32; 3] {
     [v[0] * 0.01, v[2] * 0.01, -v[1] * 0.01]
 }
 
+/// Convert a Modern Warfare 2 map position to Bevy space (m, `+Y` up).
+///
+/// The frame is the same as the game's own — `+X` forward, `+Y` right, `+Z` up — but the unit is
+/// not: a Modern Warfare 2 world unit is an **inch**, not the centimetre The First Descendant
+/// works in (a doorway is 80 units, which is 2.0 m only as inches). So the map needs its own
+/// factor at the same basis change, or its world is drawn about 2.5 times too small for the
+/// player — which is exactly what "the player is too big for the map" was.
+pub(crate) fn mw2_to_bevy(v: [f32; 3]) -> [f32; 3] {
+    [
+        v[0] * MW2_METRES_PER_UNIT,
+        v[2] * MW2_METRES_PER_UNIT,
+        -v[1] * MW2_METRES_PER_UNIT,
+    ]
+}
+
+/// One Modern Warfare 2 world unit in metres: the inch.
+pub(crate) const MW2_METRES_PER_UNIT: f32 = 0.0254;
+
 /// Convert a game-space direction (unit) to Bevy space.
 fn dir_to_bevy(v: [f32; 3]) -> [f32; 3] {
     [v[0], v[2], -v[1]]
