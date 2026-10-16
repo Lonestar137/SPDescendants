@@ -11,11 +11,13 @@
 
 pub mod iwd;
 pub mod iwi;
+pub mod maps;
 mod open;
 mod sounds;
 
 use std::path::{Path, PathBuf};
 
+pub use maps::{MapEntry, map_zone_path, parse_arena, preview_entry};
 pub use open::{Error, Memory, ZoneImage, open_zone, parse_zone_image};
 pub use sounds::{LoadedSound, PCM, RawFile, SoundAlias, Table, ZoneData, read_zone};
 
@@ -136,6 +138,14 @@ impl SoundBank {
             }
         }
         best
+    }
+
+    /// The multiplayer maps the zones carry, in the order the game's own arena file states them.
+    ///
+    /// An empty list means no zone held `mp/basemaps.arena`, which is the same as an install that
+    /// has no maps to offer.
+    pub fn maps(&self) -> Vec<MapEntry> {
+        maps::read_maps(&self.zones)
     }
 
     /// Every alias name in every zone, sorted and deduplicated.

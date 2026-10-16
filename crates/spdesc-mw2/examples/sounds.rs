@@ -22,6 +22,8 @@ fn main() -> std::process::ExitCode {
     let mut tables = false;
     let mut show: Vec<String> = Vec::new();
     let mut images: Option<PathBuf> = None;
+    let mut raw: Vec<String> = Vec::new();
+    let mut list: Vec<String> = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--match" => {
@@ -32,6 +34,16 @@ fn main() -> std::process::ExitCode {
             "--zones" => zones.extend(args.by_ref()),
             "--dump" => dump = args.next().map(PathBuf::from),
             "--tables" => tables = true,
+            "--list" => {
+                if let Some(name) = args.next() {
+                    list.push(name);
+                }
+            }
+            "--raw" => {
+                if let Some(name) = args.next() {
+                    raw.push(name);
+                }
+            }
             "--images" => images = args.next().map(PathBuf::from),
             "--show" => {
                 if let Some(name) = args.next() {
@@ -98,6 +110,30 @@ fn main() -> std::process::ExitCode {
                         .collect();
                     println!("  {row:>3}: {}", cells.join(" | "));
                 }
+            }
+        }
+    }
+    for needle in &list {
+        let names = spdesc_mw2::iwd::entry_names(&install, needle);
+        println!("\n{} archive entry name(s) for `{needle}`:", names.len());
+        for name in names.iter().take(200) {
+            println!("  {name}");
+        }
+    }
+    for wanted in &raw {
+        for (zone, data) in bank.zones() {
+            let Some(file) = data.raw_file(wanted) else {
+                continue;
+            };
+            println!(
+                "\n{zone}: {} ({} bytes{})",
+                file.name,
+                file.bytes.len(),
+                if file.zlib_compressed { ", zlib" } else { "" }
+            );
+            match file.data() {
+                Ok(bytes) => println!("{}", String::from_utf8_lossy(&bytes)),
+                Err(error) => println!("cannot read it: {error}"),
             }
         }
     }

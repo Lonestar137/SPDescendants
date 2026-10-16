@@ -506,13 +506,6 @@ fn look_direction_to_bevy(yaw: f64, pitch: f64) -> Vec3 {
 
 /// Grab and hide the cursor on startup, so mouse-look works without the pointer leaving the
 /// window.
-pub fn grab_cursor(mut windows: Query<&mut CursorOptions, With<PrimaryWindow>>) {
-    for mut options in &mut windows {
-        options.grab_mode = CursorGrabMode::Locked;
-        options.visible = false;
-    }
-}
-
 /// Release the cursor on Escape (and grab it again on the next press), so the window is escapable
 /// without quitting.
 pub fn toggle_cursor(

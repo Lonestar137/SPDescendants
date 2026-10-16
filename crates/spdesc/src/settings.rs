@@ -19,6 +19,15 @@ fn document(name: &str) -> Option<PathBuf> {
     spdesc_data::key::config_root().map(|root| root.join(name))
 }
 
+/// A JSON object's string field, or the empty string when it is absent or is not a string: a
+/// document written before a field existed is still a document.
+fn text(map: &Map<String, Value>, key: &str) -> String {
+    map.get(key)
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_owned()
+}
+
 /// A JSON object's number field, when it is one and is inside `range`.
 fn number(
     map: &Map<String, Value>,
@@ -120,6 +129,9 @@ pub fn apply_volumes(settings: Res<Settings>, mut volume: ResMut<GlobalVolume>) 
 pub struct Settings {
     pub master: f32,
     pub gun_fire: f32,
+    /// The map id last chosen. Empty means the project's own arena, which is also what a document
+    /// written before maps existed says.
+    pub map: String,
 }
 
 impl Default for Settings {
@@ -127,6 +139,7 @@ impl Default for Settings {
         Settings {
             master: 1.0,
             gun_fire: 1.0,
+            map: String::new(),
         }
     }
 }
@@ -141,14 +154,16 @@ impl Settings {
     }
 
     /// Parse a settings document. Both levels are required and must be inside `0..=1`: a level
-    /// outside that range is a broken file, not a loud one.
-    pub fn from_json(text: &str) -> Option<Settings> {
-        let Value::Object(map) = serde_json::from_str::<Value>(text).ok()? else {
+    /// outside that range is a broken file, not a loud one. The map is optional, so a document
+    /// written before maps existed still loads and starts on the project's own arena.
+    pub fn from_json(document: &str) -> Option<Settings> {
+        let Value::Object(fields) = serde_json::from_str::<Value>(document).ok()? else {
             return None;
         };
         Some(Settings {
-            master: number(&map, "master", 0.0..=1.0)?,
-            gun_fire: number(&map, "gun_fire", 0.0..=1.0)?,
+            master: number(&fields, "master", 0.0..=1.0)?,
+            gun_fire: number(&fields, "gun_fire", 0.0..=1.0)?,
+            map: text(&fields, "map"),
         })
     }
 
@@ -157,6 +172,7 @@ impl Settings {
         for (key, value) in [("master", self.master), ("gun_fire", self.gun_fire)] {
             map.insert(key.to_string(), serde_json::json!(value));
         }
+        map.insert("map".to_string(), serde_json::json!(self.map));
         let mut text =
             serde_json::to_string_pretty(&Value::Object(map)).unwrap_or_else(|_| "{}".to_string());
         text.push('\n');
@@ -282,6 +298,7 @@ mod document_tests {
         let settings = Settings {
             master: 0.35,
             gun_fire: 0.8,
+            map: "mp_rust".to_owned(),
         };
         assert_eq!(
             Settings::from_json(&settings.to_json()).as_ref(),
@@ -298,6 +315,17 @@ mod document_tests {
             Settings::from_json(r#"{"master":"loud","gun_fire":1.0}"#),
             None
         );
+
+        // A document written before maps existed is still a document: it loads and starts on the
+        // project's own arena. A map field that is not a string is no map at all.
+        let older = Settings::from_json(r#"{"master":0.5,"gun_fire":0.5}"#).expect("a file");
+        assert_eq!(older.map, "");
+        assert_eq!(older.master, 0.5);
+        let odd = Settings::from_json(r#"{"master":0.5,"gun_fire":0.5,"map":7}"#).expect("a file");
+        assert_eq!(odd.map, "");
+        let chosen = Settings::from_json(r#"{"master":0.5,"gun_fire":0.5,"map":"mp_rust"}"#)
+            .expect("a file");
+        assert_eq!(chosen.map, "mp_rust");
     }
 
     /// The shot obeys both levels; every other cue obeys the master alone.
@@ -306,12 +334,14 @@ mod document_tests {
         let settings = Settings {
             master: 0.5,
             gun_fire: 0.5,
+            map: String::new(),
         };
         assert_eq!(settings.cue(0.6), 0.3);
         assert_eq!(settings.shot(0.6), 0.15);
         let silence = Settings {
             master: 0.0,
             gun_fire: 1.0,
+            map: String::new(),
         };
         assert_eq!(silence.shot(0.6), 0.0);
         assert_eq!(silence.cue(0.6), 0.0);

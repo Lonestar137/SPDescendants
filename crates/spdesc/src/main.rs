@@ -11,6 +11,7 @@ mod combat;
 mod content;
 mod hair;
 mod loading;
+mod map;
 mod menu;
 mod player;
 mod progress;
@@ -24,8 +25,9 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 
+use map::{ChosenMap, Previews, build_rows, collect_previews, follow_choice, sync_targets};
 use menu::{
-    draw_dev, draw_pages, draw_rows, draw_scrollbars, draw_tabs, menu_keys, menu_pointer,
+    draw_dev, draw_map, draw_pages, draw_rows, draw_scrollbars, draw_tabs, menu_keys, menu_pointer,
     place_menu, setup_menu,
 };
 use progress::{
@@ -36,15 +38,12 @@ use settings::{CareerSave, Settings, apply_volumes};
 use spdesc_mw2::SoundBank;
 
 use audio::Sounds;
-use combat::{
-    Muzzle, Weapon, WeaponRig, age_effects, fire_weapon, spawn_enemies, tick_weapon, update_targets,
-};
+use combat::{Muzzle, Weapon, WeaponRig, age_effects, fire_weapon, tick_weapon, update_targets};
 use content::{CharacterAssets, MaterialSpec};
 use hair::{Hair, animate_hair};
 use loading::{ModelKey, ModelLoader};
 use player::{
-    Animator, CameraRig, Player, animate_locomotion, drive_player, follow_camera, grab_cursor,
-    toggle_cursor,
+    Animator, CameraRig, Player, animate_locomotion, drive_player, follow_camera, toggle_cursor,
 };
 use spdesc_data::texture::Texture;
 
@@ -68,11 +67,11 @@ fn main() {
         // The menu's open flag is read by a run condition, which runs before any startup system
         // does: it has to exist from the first frame.
         .init_resource::<menu::Menu>()
+        .init_resource::<ChosenMap>()
         .add_systems(
             Startup,
             (
                 setup_scene,
-                grab_cursor,
                 setup_hud,
                 setup_progress,
                 setup_menu,
@@ -80,29 +79,43 @@ fn main() {
                 start_loader,
                 setup_mw2,
                 setup_character,
-            ),
+            )
+                // Ordered, so each system's resources are in place for the next: the menus need
+                // the settings, and the character the sound bank the map catalogue comes from.
+                .chain(),
         )
         .add_systems(
             Update,
             (
-                menu_keys,
-                menu_pointer,
-                stream_models,
-                apply_model,
-                save_selection,
-                place_menu,
-                draw_pages,
-                draw_tabs,
-                draw_rows,
-                draw_scrollbars,
-                draw_dev,
-                draw_hud,
-                draw_progress,
-                award_experience,
-                debug_progress,
-                apply_volumes,
-                save_career,
-                save_career_on_exit,
+                (
+                    menu_keys,
+                    menu_pointer,
+                    collect_previews,
+                    follow_choice,
+                    sync_targets,
+                    draw_map,
+                    draw_map_label,
+                    stream_models,
+                    apply_model,
+                    save_selection,
+                )
+                    .chain(),
+                (
+                    place_menu,
+                    draw_pages,
+                    draw_tabs,
+                    draw_rows,
+                    draw_scrollbars,
+                    draw_dev,
+                    draw_hud,
+                    draw_progress,
+                    award_experience,
+                    debug_progress,
+                    apply_volumes,
+                    save_career,
+                    save_career_on_exit,
+                )
+                    .chain(),
                 (
                     toggle_cursor,
                     drive_player,
@@ -197,6 +210,9 @@ fn setup_mw2(
     let insignia = progress::load_insignia(install.as_deref(), &career, &mut images);
 
     commands.insert_resource(Sounds::load(&mut sources, bank.as_ref()));
+    // The bank is kept: the map catalogue is read out of the same zone, and an install that is
+    // absent leaves an empty bank rather than no bank at all.
+    commands.insert_resource(Zones(bank.unwrap_or_default()));
     commands.insert_resource(career);
     commands.insert_resource(insignia);
 }
@@ -268,7 +284,8 @@ fn setup_scene(
         ));
     }
 
-    spawn_enemies(&mut commands, &mut meshes, &mut materials, &mut images);
+    // The practice targets are not part of the ground: they belong to the map being played, and
+    // `map::sync_targets` puts them up when that map is the project's own arena.
 }
 
 /// A two-tone checker image with `cell`-pixel squares.
@@ -319,6 +336,16 @@ struct HudText;
 #[derive(Component)]
 struct Reticle;
 
+/// The line naming the map the game is playing on.
+#[derive(Component)]
+struct MapLabel;
+
+/// The Modern Warfare 2 zones the app read, kept so the things built out of them — the map
+/// catalogue — are built from what the install actually ships. `SoundBank` itself is Bevy-free,
+/// which is why it is wrapped rather than made a resource there.
+#[derive(Resource, Default)]
+struct Zones(SoundBank);
+
 /// The crosshair and the ammunition readout.
 fn setup_hud(mut commands: Commands) {
     commands
@@ -345,6 +372,23 @@ fn setup_hud(mut commands: Commands) {
             ));
         });
     commands.spawn((
+        MapLabel,
+        Text::new(""),
+        TextFont {
+            font_size: bevy::text::FontSize::Px(16.0),
+            ..default()
+        },
+        TextColor(Color::srgb(0.86, 0.9, 0.96)),
+        TextLayout::justify(bevy::text::Justify::Center),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(0.0),
+            right: Val::Px(0.0),
+            top: Val::Px(18.0),
+            ..default()
+        },
+    ));
+    commands.spawn((
         HudText,
         Text::new(""),
         TextFont {
@@ -359,6 +403,25 @@ fn setup_hud(mut commands: Commands) {
             ..default()
         },
     ));
+}
+
+/// Name the map being played, so the choice is visible outside the menu as well as inside it.
+fn draw_map_label(
+    menu: Res<menu::Menu>,
+    chosen: Res<ChosenMap>,
+    mut labels: Query<&mut Text, With<MapLabel>>,
+) {
+    let Ok(mut text) = labels.single_mut() else {
+        return;
+    };
+    let rendered = if menu.open || chosen.title.is_empty() {
+        String::new()
+    } else {
+        chosen.title.clone()
+    };
+    if text.0 != rendered {
+        text.0 = rendered;
+    }
 }
 
 /// Draw the HUD: the crosshair over the aim, and the magazine and reload countdown.
@@ -414,12 +477,15 @@ fn build_character(key: &ModelKey) -> anyhow::Result<CharacterAssets> {
 
 /// The player entity, the initial model, and the menu overlay. Falls back to a capsule when the
 /// data, key, or mapping is absent, so the program is still playable.
+#[allow(clippy::too_many_arguments)]
 fn setup_character(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut inverse_bindposes: ResMut<Assets<SkinnedMeshInverseBindposes>>,
+    bank: Res<Zones>,
+    settings: Res<Settings>,
 ) {
     let player = commands
         .spawn((
@@ -453,6 +519,22 @@ fn setup_character(
         info!("selection: {}", menu.saved().describe());
     }
     info!("catalog: {listed} characters, e.g. {names}");
+
+    // The maps the install ships, and the one the player last chose. The game opens on the map
+    // page, because the ground to play on is the first thing a game asks for.
+    let rows = build_rows(&bank.0, spdesc_game_core::mw2_data().as_deref());
+    info!(
+        "maps: {} offered, e.g. {}",
+        rows.len(),
+        rows.iter()
+            .take(6)
+            .map(|row| row.map.title.clone())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    commands.insert_resource(Previews::start(&rows));
+    menu.fill_maps(rows, &settings.map);
+    menu.open = true;
 
     let initial = menu.key();
     match initial.as_ref().map(build_character) {
@@ -801,13 +883,22 @@ fn apply_model(
 
 /// Remember the selection when the player confirms it. The highlight is previewed freely; only a
 /// confirmation is written, so a walk through the list does not rewrite the file at every step.
-fn save_selection(mut menu: ResMut<menu::Menu>) {
+fn save_selection(mut menu: ResMut<menu::Menu>, mut settings: ResMut<Settings>) {
     if !menu.requested {
         return;
     }
     menu.requested = false;
     if let Err(error) = menu.saved().save() {
         warn!("could not save the selection ({error:#})");
+    }
+    // The map is a setting, so it is written with the settings — and only when it has changed, so
+    // a walk through the map list does not rewrite the file at every step.
+    let map = menu.saved_map();
+    if settings.map != map {
+        settings.map = map;
+        if let Err(error) = settings.save() {
+            warn!("could not save the map choice ({error:#})");
+        }
     }
 }
 

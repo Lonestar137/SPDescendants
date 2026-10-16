@@ -46,14 +46,25 @@ optional — without it, the app falls back to its own synthesised cues and the 
 
 ## Playing
 
-`Tab` opens the menu and closes it. It has two pages, swapped with `[` and `]`. **Character** holds the
-four lists — character, body skin, head, face — which scroll, so nothing runs off the screen; the
-focused list is the one the arrows walk, `PageUp`/`PageDown` jump a page and `Home`/`End` go to the
-ends. **Developer** holds the level and prestige, the buttons to grant experience, take the prestige
-on offer or reset it, and the gun-fire and master volume sliders. Every choice previews on the
-character as it is highlighted, so nothing has to be confirmed to be seen; `Enter`, `Escape`, `Tab`
-or the Close button all apply and close. Otherwise: `WASD`/arrows move, `Shift` sprints, `Space`
-jumps, the mouse orbits, right-click aims, hold left-click to fire, and `R` reloads.
+The game opens on its menu, and `Tab` opens and closes it after that. It has three pages, swapped
+with `[` and `]`. **Map** chooses the ground to play on: the project's own arena, or a map read out
+of the player's Modern Warfare 2 install, each drawn with its own preview art beside the list.
+**Character** holds the four lists — character, body skin, head, face — and **Developer** the level
+and prestige, the experience and prestige buttons, and the gun-fire and master volume sliders. Each
+page's lists scroll, so nothing runs off the screen; the focused list is the one the arrows walk,
+`PageUp`/`PageDown` jump a page and `Home`/`End` go to the ends. Every choice previews as it is
+highlighted — a skin or a face on the character, a map's art beside its list — so nothing has to be
+confirmed to be seen; `Enter`, `Escape`, `Tab` or the Close button all apply and close.
+
+Outside the menu: `WASD`/arrows move, `Shift` sprints, `Space` jumps, the mouse orbits, right-click
+aims, hold left-click to fire, and `R` reloads. The map being played is named along the top of the
+screen.
+
+**The practice targets stand on the project's own arena and nowhere else.** An imported map is
+played without them, because a target is something this project put there rather than something a
+map expects. Nothing else about an imported map is read yet — its geometry is not parsed, so the
+ground is the project's own arena with that map's name on it; `docs/research/MW2-MAPS.md` records
+what is and is not read.
 
 Each target pays experience — a hit is worth 10 and a kill 100 — against Modern Warfare 2's own
 rank table, so the bottom-left panel shows the level, the rank insignia, and how far the next rank

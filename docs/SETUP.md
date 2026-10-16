@@ -154,13 +154,16 @@ sounds), run inside `nix-shell`:
 cargo play
 ```
 
-`Tab` opens/closes the menu. It has two pages, swapped with `[` and `]`: **Character**, whose four
-lists (character, body skin, head, face) scroll and preview on the character as they are
-highlighted, and **Developer**, which holds the level and prestige, the buttons for experience and
-prestige, and the gun-fire and master volume sliders. The focused list is the one the arrows walk;
+The game opens on its menu; `Tab` opens and closes it after that. It has three pages, swapped with
+`[` and `]`: **Map** (the project's own arena, or a map read out of `MW2_DATA` with its own preview
+art), **Character** (character, body skin, head, face — four scrolling lists that preview on the
+character as they are highlighted), and **Developer** (level, prestige, the experience and prestige
+buttons, and the gun-fire and master volume sliders). The focused list is the one the arrows walk;
 `PageUp`/`PageDown` jump a page and `Home`/`End` go to the ends. `Enter`, `Escape`, `Tab` or Close
 all apply and close. Outside the menu, `WASD` or the arrow keys move, `Shift` sprints, `Space`
 jumps, the mouse orbits, right-click aims, hold left-click to fire, and `R` reloads.
+
+The practice targets stand on the project's own arena only; an imported map is played without them.
 
 Run the in-loop checks for a change, and the full gate chain before landing it:
 
@@ -187,7 +190,7 @@ it changes and not otherwise:
 | File | Holds |
 | --- | --- |
 | `selection.json` | the character, body skin, head and face last applied |
-| `settings.json` | the gun-fire and master volumes |
+| `settings.json` | the gun-fire and master volumes, and the map last chosen |
 | `career.json` | the level, the prestige, and the experience inside the rank |
 
 Each stands alone: a missing or malformed file means the default, never a half-read state, so

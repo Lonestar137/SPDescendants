@@ -1,29 +1,34 @@
 //! The menu: one panel for everything the player sets.
 //!
-//! It holds two pages behind a tab row. **Character** chooses the character, its body skin, a head
-//! (hairstyle) variant and a face (makeup) preset — the four lists the old select screen drew as
-//! columns of text, now lists that scroll and cannot run off the screen. **Developer** holds the
-//! career controls and the sound levels.
+//! It holds three pages behind a tab row. **Map** chooses the ground the game is played on — the
+//! project's own arena, or a map read out of the player's Modern Warfare 2 install, with that map's
+//! own preview art beside the list. **Character** chooses the character, its body skin, a head
+//! (hairstyle) variant and a face (makeup) preset. **Developer** holds the career controls and the
+//! sound levels.
 //!
 //! It is the game's own Bevy UI, not a second UI stack: `bevy_egui` needs Bevy 0.18 and this tree is
 //! on 0.20, and nothing newer is reachable from here, so the panel, its lists, its buttons and its
 //! sliders are nodes.
 //!
-//! The highlight *is* the selection: moving through a list previews the choice on the character, so
-//! a hairstyle or a face does not have to be confirmed to be seen. The choice is written to disk
-//! when the menu closes, not on every step.
+//! The highlight *is* the selection: moving through a list previews the choice, so a hairstyle, a
+//! face or a map does not have to be confirmed to be seen. The choice is written to disk when the
+//! menu closes, not on every step.
 //!
-//! Geometry is decided in one place — [`list_rect`], [`row_rect`], [`bar_rect`], [`tab_rect`] and
-//! the rest — and both the nodes that are drawn and the pointer that is hit-tested against them
-//! read it, so the two cannot drift apart. The panel itself is placed in the middle of the window
-//! by [`panel_origin`], which the pointer maths undo.
+//! Geometry is decided in one place — [`Pane::rect`] and the rest — and both the nodes that are
+//! drawn and the pointer that is hit-tested against them read it, so the two cannot drift apart.
+//! The panel itself is placed in the middle of the window by [`panel_origin`], which the pointer
+//! maths undo.
 
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
+use bevy::ui::widget::ImageNode;
 use bevy::window::{CursorOptions, PrimaryWindow};
+
+use spdesc_game_core as game_core;
 
 use crate::catalog;
 use crate::loading::ModelKey;
+use crate::map::{MapRow, Previews};
 use crate::progress::{self, Career};
 use crate::set_cursor_grab;
 use crate::settings::Settings;
@@ -42,9 +47,21 @@ const ROWS: usize = 22;
 /// The scrollbar's width and the gap before it.
 const BAR: f32 = 12.0;
 const BAR_GAP: f32 = 8.0;
-/// A list column's width and the gap between columns.
+/// A list column's width and the gap between columns, and the map list's own width.
 const COL_W: f32 = 270.0;
 const COL_GAP: f32 = 20.0;
+const MAP_W: f32 = 400.0;
+
+/// The map preview: a 16:9 frame of the highlighted map's own art, beside the list.
+const PREVIEW_X: f32 = PAD + MAP_W + 24.0;
+const PREVIEW_Y: f32 = BODY_Y + 34.0;
+const PREVIEW_W: f32 = PANEL_SIZE.x - PREVIEW_X - PAD;
+const PREVIEW_H: f32 = PREVIEW_W * 9.0 / 16.0;
+
+/// The preview's frame, panel-local: `[x, y, width, height]`.
+fn preview_rect() -> [f32; 4] {
+    [PREVIEW_X, PREVIEW_Y, PREVIEW_W, PREVIEW_H]
+}
 
 /// The tab row, and where the page body starts.
 const TABS_Y: f32 = 44.0;
@@ -62,40 +79,80 @@ const HINT_Y: f32 = PANEL_SIZE.y - 34.0;
 /// The "Close" button in the tab row.
 const CLOSE_W: f32 = 120.0;
 
-/// The panel-local rect of list `list`'s viewport: `[x, y, width, height]`.
-pub(crate) fn list_rect(list: usize) -> [f32; 4] {
-    [
-        PAD + list as f32 * (COL_W + COL_GAP),
-        LIST_Y,
-        COL_W - BAR - BAR_GAP,
-        LIST_H,
-    ]
+/// One scrollable list of choices. The character page has four side by side, the map page has one,
+/// and the developer page has none.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum Pane {
+    /// A list on the character page, by column.
+    Character(usize),
+    /// The map list, which is also what the menu opens on.
+    #[default]
+    Map,
 }
 
-/// The panel-local rect of list `list`'s title line.
-fn list_title_rect(list: usize) -> [f32; 4] {
-    [
-        PAD + list as f32 * (COL_W + COL_GAP),
-        BODY_Y,
-        COL_W,
-        LIST_TITLE_H,
-    ]
+/// The lists on the character page, in the order the arrows and the pointer walk them.
+const CHARACTER_PANES: [Pane; LISTS] = [
+    Pane::Character(0),
+    Pane::Character(1),
+    Pane::Character(2),
+    Pane::Character(3),
+];
+/// The lists on the map page.
+const MAP_PANES: [Pane; 1] = [Pane::Map];
+
+/// The lists `page` shows.
+fn panes(page: Page) -> &'static [Pane] {
+    match page {
+        Page::Map => &MAP_PANES,
+        Page::Character => &CHARACTER_PANES,
+        Page::Developer => &[],
+    }
 }
 
-/// The panel-local rect of the `slot`-th visible row of list `list`. Rows tile the viewport exactly.
-pub(crate) fn row_rect(list: usize, slot: usize) -> [f32; 4] {
-    let [x, y, w, _] = list_rect(list);
-    [x, y + slot as f32 * ROW, w, ROW]
-}
+impl Pane {
+    /// Where the list starts and how wide it is. The map list is one wide column; the character
+    /// page's four share the panel between them.
+    fn column(self) -> (f32, f32) {
+        match self {
+            Pane::Character(list) => (PAD + list as f32 * (COL_W + COL_GAP), COL_W),
+            Pane::Map => (PAD, MAP_W),
+        }
+    }
 
-/// The panel-local rect of list `list`'s scrollbar track.
-pub(crate) fn bar_rect(list: usize) -> [f32; 4] {
-    [
-        PAD + list as f32 * (COL_W + COL_GAP) + COL_W - BAR,
-        LIST_Y,
-        BAR,
-        LIST_H,
-    ]
+    /// Its viewport: `[x, y, width, height]`, panel-local.
+    pub(crate) fn rect(self) -> [f32; 4] {
+        let (x, width) = self.column();
+        [x, LIST_Y, width - BAR - BAR_GAP, LIST_H]
+    }
+
+    /// Its title line.
+    fn title_rect(self) -> [f32; 4] {
+        let (x, width) = self.column();
+        [x, BODY_Y, width, LIST_TITLE_H]
+    }
+
+    /// Its scrollbar track.
+    pub(crate) fn bar_rect(self) -> [f32; 4] {
+        let (x, width) = self.column();
+        [x + width - BAR, LIST_Y, BAR, LIST_H]
+    }
+
+    /// The `slot`-th visible row, relative to the list's own viewport. Rows tile it exactly.
+    fn row_rect(self, slot: usize) -> [f32; 4] {
+        let [_, _, w, _] = self.rect();
+        [0.0, slot as f32 * ROW, w, ROW]
+    }
+
+    /// What the list is called, with its count appended where it is drawn.
+    fn name(self) -> &'static str {
+        match self {
+            Pane::Character(0) => "CHARACTER",
+            Pane::Character(1) => "BODY SKIN",
+            Pane::Character(2) => "HEAD",
+            Pane::Character(_) => "FACE",
+            Pane::Map => "MAP",
+        }
+    }
 }
 
 /// The panel-local rect of tab `index`.
@@ -144,17 +201,22 @@ fn max_scroll(total: i32) -> i32 {
     (total - ROWS as i32).max(0)
 }
 
-/// Which page the menu is showing.
+/// Which page the menu is showing. It opens on the map, which is the first choice a game asks for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum Page {
     #[default]
+    Map,
     Character,
     Developer,
 }
 
+/// The pages, in tab order.
+const PAGES: [Page; 3] = [Page::Map, Page::Character, Page::Developer];
+
 impl Page {
     fn name(self) -> &'static str {
         match self {
+            Page::Map => "MAP",
             Page::Character => "CHARACTER",
             Page::Developer => "DEVELOPER",
         }
@@ -162,6 +224,9 @@ impl Page {
 
     fn hint(self) -> &'static str {
         match self {
+            Page::Map => {
+                "up/down step   pgup/pgdn jump   home/end ends   enter apply   [ ] page   tab close"
+            }
             Page::Character => {
                 "up/down step   pgup/pgdn jump   home/end ends   left/right column   enter apply   [ ] page   tab close"
             }
@@ -213,19 +278,25 @@ const GRANT: u32 = 25_000;
 // ---------------------------------------------------------------------------------------------
 // The menu's state
 
-/// The select screen's state: everything the player is choosing, and what is being shown.
+/// Everything the player is choosing, and what is being shown.
 #[derive(Resource, Default)]
 pub(crate) struct Menu {
     pub(crate) open: bool,
     page: Page,
     /// Every character whose skins the catalog found.
     characters: Vec<catalog::Character>,
+    /// Every map on offer, the project's own first, and the rule the choices resolve against.
+    map_rows: Vec<MapRow>,
+    maps: game_core::Maps,
     /// Which list the arrows act on.
-    column: usize,
-    /// The highlighted item in each list: character, body skin, head, face.
+    focus: Pane,
+    /// The highlighted item in each character list: character, body skin, head, face.
     picked: [usize; LISTS],
-    /// The first visible row of each list.
+    /// The first visible row of each character list.
     scroll: [i32; LISTS],
+    /// The highlighted map, and the first visible row of its list.
+    map_pick: usize,
+    map_scroll: i32,
     /// Which slider the developer page's arrows act on.
     dev_focus: usize,
     /// Set when the player confirms; the selection is written to disk once, not on every step.
@@ -237,7 +308,7 @@ impl Menu {
         self.characters.get(self.picked[0])
     }
 
-    /// The length of each list, in column order.
+    /// The length of each character list, in column order.
     pub(crate) fn lengths(&self) -> [usize; LISTS] {
         [
             self.characters.len(),
@@ -247,18 +318,87 @@ impl Menu {
         ]
     }
 
-    fn count(&self, list: usize) -> usize {
-        self.lengths()[list]
+    /// How many items a list holds.
+    fn count(&self, pane: Pane) -> usize {
+        match pane {
+            Pane::Character(list) => self.lengths()[list],
+            Pane::Map => self.map_rows.len(),
+        }
     }
 
-    /// The catalogue as the menu needs it: the characters, and the item the player last applied.
+    /// The highlight in a list.
+    fn selected(&self, pane: Pane) -> usize {
+        match pane {
+            Pane::Character(list) => self.picked[list],
+            Pane::Map => self.map_pick,
+        }
+    }
+
+    /// The first visible row of a list.
+    fn scroll_of(&self, pane: Pane) -> i32 {
+        match pane {
+            Pane::Character(list) => self.scroll[list],
+            Pane::Map => self.map_scroll,
+        }
+    }
+
+    fn set_scroll(&mut self, pane: Pane, value: i32) {
+        match pane {
+            Pane::Character(list) => self.scroll[list] = value,
+            Pane::Map => self.map_scroll = value,
+        }
+    }
+
+    /// The characters the catalog found, and the selection the player last applied.
     pub(crate) fn fill(&mut self, characters: Vec<catalog::Character>) {
         self.characters = characters;
         self.clamp();
     }
 
-    /// The label of item `index` in list `list`, as a row shows it.
-    fn label(&self, list: usize, index: usize) -> String {
+    /// The maps on offer, and the id the player last chose.
+    pub(crate) fn fill_maps(&mut self, rows: Vec<MapRow>, saved: &str) {
+        self.maps = match rows.split_first() {
+            Some((first, rest)) => {
+                game_core::Maps::new(first.map.clone(), rest.iter().map(|row| row.map.clone()))
+            }
+            None => game_core::Maps::default(),
+        };
+        self.map_rows = rows;
+        // The catalogue owns the rule: an id this install no longer ships lands on the default.
+        self.map_pick = self
+            .maps
+            .resolve(saved)
+            .and_then(|map| self.map_rows.iter().position(|row| row.map.id == map.id))
+            .unwrap_or(0);
+        self.clamp();
+        self.scroll_into_view(Pane::Map);
+    }
+
+    /// The map being played: its title, and whether the practice targets stand on it.
+    pub(crate) fn chosen_map(&self) -> (String, bool) {
+        match self.map_rows.get(self.map_pick) {
+            Some(row) => (row.map.title.clone(), row.map.targets),
+            None => (String::new(), false),
+        }
+    }
+
+    /// The highlighted map, for the art and detail the menu shows beside the list.
+    pub(crate) fn map_row(&self) -> Option<&MapRow> {
+        self.map_rows.get(self.map_pick)
+    }
+
+    /// The label of item `index` in a list, as a row shows it.
+    fn label(&self, pane: Pane, index: usize) -> String {
+        if let Pane::Map = pane {
+            return self
+                .map_rows
+                .get(index)
+                .map(|row| row.map.title.clone())
+                .unwrap_or_default();
+        }
+        let Pane::Character(list) = pane else {
+            return String::new();
+        };
         let Some(character) = self.character() else {
             return String::new();
         };
@@ -286,60 +426,100 @@ impl Menu {
         }
     }
 
-    /// Highlight `index` in `list`, clamped to the list's own length.
-    fn pick(&mut self, list: usize, index: usize) {
-        let count = self.count(list);
-        self.picked[list] = if count == 0 { 0 } else { index.min(count - 1) };
+    /// Highlight `index` in a list, clamped to the list's own length.
+    fn pick(&mut self, pane: Pane, index: usize) {
+        let count = self.count(pane);
+        let index = if count == 0 { 0 } else { index.min(count - 1) };
+        match pane {
+            Pane::Character(list) => self.picked[list] = index,
+            Pane::Map => self.map_pick = index,
+        }
     }
 
-    /// Move the highlight in `list` by one, wrapping.
-    fn step(&mut self, list: usize, up: bool) {
-        let length = self.count(list);
+    /// Move the highlight in a list by one, wrapping.
+    fn step(&mut self, pane: Pane, up: bool) {
+        let length = self.count(pane);
         if length == 0 {
             return;
         }
-        self.picked[list] = if up {
-            (self.picked[list] + length - 1) % length
+        let index = self.selected(pane);
+        let next = if up {
+            (index + length - 1) % length
         } else {
-            (self.picked[list] + 1) % length
+            (index + 1) % length
         };
+        self.pick(pane, next);
     }
 
-    /// Keep every highlight inside its list (a shorter list after switching character).
+    /// Keep every highlight inside its list (shorter lists after a change, or a new catalogue).
     fn clamp(&mut self) {
-        for list in 0..LISTS {
-            self.pick(list, self.picked[list]);
-            self.scroll[list] = self.scroll[list].clamp(0, max_scroll(self.count(list) as i32));
+        for pane in CHARACTER_PANES {
+            self.pick(pane, self.selected(pane));
+            let max = max_scroll(self.count(pane) as i32);
+            self.set_scroll(pane, self.scroll_of(pane).clamp(0, max));
         }
+        self.pick(Pane::Map, self.map_pick);
+        let max = max_scroll(self.count(Pane::Map) as i32);
+        self.set_scroll(Pane::Map, self.map_scroll.clamp(0, max));
     }
 
-    /// Scroll so the highlighted row of `list` is on screen.
-    fn scroll_into_view(&mut self, list: usize) {
-        let selected = self.picked[list] as i32;
-        if selected < self.scroll[list] {
-            self.scroll[list] = selected;
+    /// Scroll so a list's highlighted row is on screen.
+    fn scroll_into_view(&mut self, pane: Pane) {
+        let selected = self.selected(pane) as i32;
+        let mut scroll = self.scroll_of(pane);
+        if selected < scroll {
+            scroll = selected;
         }
-        if selected >= self.scroll[list] + ROWS as i32 {
-            self.scroll[list] = selected - ROWS as i32 + 1;
+        if selected >= scroll + ROWS as i32 {
+            scroll = selected - ROWS as i32 + 1;
         }
-        self.scroll[list] = self.scroll[list].clamp(0, max_scroll(self.count(list) as i32));
+        let max = max_scroll(self.count(pane) as i32);
+        self.set_scroll(pane, scroll.clamp(0, max));
     }
 
-    /// Scroll `list` by `delta` rows, within its bounds.
-    fn scroll_by(&mut self, list: usize, delta: i32) {
-        let max = max_scroll(self.count(list) as i32);
-        self.scroll[list] = (self.scroll[list] + delta).clamp(0, max);
+    /// Scroll a list by `delta` rows, within its bounds.
+    fn scroll_by(&mut self, pane: Pane, delta: i32) {
+        let max = max_scroll(self.count(pane) as i32);
+        self.set_scroll(pane, (self.scroll_of(pane) + delta).clamp(0, max));
     }
 
     /// Move the highlight in the focused list by a pageful, taking the scroll with it.
     fn page_step(&mut self, up: bool) {
-        let list = self.column;
+        let pane = self.focus;
         let delta = ROWS as i32 * if up { -1 } else { 1 };
-        self.scroll_by(list, delta);
-        let target =
-            (self.picked[list] as i32 + delta).clamp(0, self.count(list).saturating_sub(1) as i32);
-        self.pick(list, target as usize);
-        self.scroll_into_view(list);
+        self.scroll_by(pane, delta);
+        let target = (self.selected(pane) as i32 + delta)
+            .clamp(0, self.count(pane).saturating_sub(1) as i32);
+        self.pick(pane, target as usize);
+        self.scroll_into_view(pane);
+    }
+
+    /// Walk the focused list: a step, a page, or an end.
+    fn walk(&mut self, up: bool, down: bool, page: Option<bool>, end: Option<bool>) {
+        let pane = self.focus;
+        if up || down {
+            self.step(pane, up);
+            self.clamp();
+            self.scroll_into_view(pane);
+        }
+        if let Some(page_up) = page {
+            self.page_step(page_up);
+        }
+        if let Some(last) = end {
+            self.pick(pane, if last { usize::MAX } else { 0 });
+            self.scroll_into_view(pane);
+        }
+    }
+
+    /// Put the focus on a list the page actually shows, and take the page's list with it.
+    fn focus_page(&mut self) {
+        let lists = panes(self.page);
+        if !lists.contains(&self.focus)
+            && let Some(first) = lists.first()
+        {
+            self.focus = *first;
+        }
+        self.scroll_into_view(self.focus);
     }
 
     /// The current selection as it is written to disk, and applied from it.
@@ -375,6 +555,14 @@ impl Menu {
         }
     }
 
+    /// The map the player chose, as it is written to disk.
+    pub(crate) fn saved_map(&self) -> String {
+        self.map_rows
+            .get(self.map_pick)
+            .map(|row| row.map.id.clone())
+            .unwrap_or_default()
+    }
+
     /// Move the selection onto `saved`, per column and independently: a character that no longer
     /// exists, or a skin its character no longer ships, leaves that column where it started rather
     /// than failing the whole selection.
@@ -402,8 +590,8 @@ impl Menu {
             self.picked[3] = face;
         }
         self.clamp();
-        for list in 0..LISTS {
-            self.scroll_into_view(list);
+        for pane in CHARACTER_PANES {
+            self.scroll_into_view(pane);
         }
     }
 
@@ -432,9 +620,9 @@ impl Menu {
         })
     }
 
-    /// The key with one list stepped by `step`, wrapping like the highlight does.
+    /// The key with one character list stepped by `step`, wrapping like the highlight does.
     fn key_stepped(&self, list: usize, step: i32) -> Option<ModelKey> {
-        let length = self.count(list) as i32;
+        let length = self.lengths()[list] as i32;
         if length == 0 {
             return None;
         }
@@ -444,12 +632,16 @@ impl Menu {
     }
 
     /// The models a step away from the highlight, so stepping either way is instant. Only the
-    /// focused list is prefetched: it is the one the next key press will change.
+    /// focused character list is prefetched: it is the one the next key press will change, and a
+    /// map has no model to prefetch.
     pub(crate) fn prefetch_keys(&self) -> Vec<ModelKey> {
+        let Pane::Character(list) = self.focus else {
+            return Vec::new();
+        };
         let mut keys = Vec::new();
         let current = self.key();
         for step in [-1, 1] {
-            if let Some(key) = self.key_stepped(self.column, step)
+            if let Some(key) = self.key_stepped(list, step)
                 && Some(&key) != current.as_ref()
                 && !keys.contains(&key)
             {
@@ -476,16 +668,22 @@ pub(crate) struct TabBox(Page);
 pub(crate) struct TabLabel(Page);
 /// A list's title line.
 #[derive(Component)]
-pub(crate) struct ColumnTitle(usize);
+pub(crate) struct ColumnTitle(Pane);
 /// One visible row of a list.
 #[derive(Component)]
 pub(crate) struct RowText {
-    list: usize,
+    pane: Pane,
     slot: usize,
 }
 /// A list's scrollbar thumb.
 #[derive(Component)]
-pub(crate) struct ScrollThumb(usize);
+pub(crate) struct ScrollThumb(Pane);
+/// The map page's preview art, filled in once the install's art has been read.
+#[derive(Component)]
+pub(crate) struct MapPreview;
+/// The map page's line of detail about the highlighted map.
+#[derive(Component)]
+pub(crate) struct MapDetail;
 /// The line naming the career the developer page is acting on.
 #[derive(Component)]
 pub(crate) struct DevStatus;
@@ -535,7 +733,7 @@ pub(crate) fn setup_menu(mut commands: Commands) {
                 GOLD,
                 FixedText,
             );
-            for (index, page) in [Page::Character, Page::Developer].iter().enumerate() {
+            for (index, page) in PAGES.iter().enumerate() {
                 let [x, y, w, h] = tab_rect(index);
                 panel
                     .spawn((
@@ -568,6 +766,7 @@ pub(crate) fn setup_menu(mut commands: Commands) {
             }
             let [x, y, w, h] = close_rect();
             button(panel, [x, y, w, h], "Close (Tab)", FixedText);
+            map_page(panel);
             character_page(panel);
             developer_page(panel);
             text(
@@ -581,6 +780,46 @@ pub(crate) fn setup_menu(mut commands: Commands) {
         });
 }
 
+/// The map page: the list, and the highlighted map's own art and detail beside it.
+fn map_page(panel: &mut ChildSpawnerCommands) {
+    panel
+        .spawn((
+            PageBody(Page::Map),
+            Node {
+                position_type: PositionType::Absolute,
+                ..default()
+            },
+            Visibility::Inherited,
+        ))
+        .with_children(|body| {
+            list(body, Pane::Map);
+            let [px, py, pw, ph] = preview_rect();
+            body.spawn((
+                MapPreview,
+                ImageNode::default(),
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(px),
+                    top: Val::Px(py),
+                    width: Val::Px(pw),
+                    height: Val::Px(ph),
+                    border: UiRect::all(Val::Px(1.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.05)),
+                BorderColor::from(EDGE),
+            ));
+            text(
+                body,
+                [px, py + ph + 16.0, pw, 48.0],
+                "",
+                13.0,
+                DIM,
+                MapDetail,
+            );
+        });
+}
+
 /// The character page: four scrolling lists, each with a title and a scrollbar.
 fn character_page(panel: &mut ChildSpawnerCommands) {
     panel
@@ -590,71 +829,70 @@ fn character_page(panel: &mut ChildSpawnerCommands) {
                 position_type: PositionType::Absolute,
                 ..default()
             },
-            Visibility::Inherited,
+            Visibility::Hidden,
         ))
         .with_children(|body| {
-            for list in 0..LISTS {
+            for pane in CHARACTER_PANES {
+                list(body, pane);
+            }
+        });
+}
+
+/// One list: its title, its rows, and its scrollbar.
+fn list(parent: &mut ChildSpawnerCommands, pane: Pane) {
+    text(parent, pane.title_rect(), "", 14.0, GOLD, ColumnTitle(pane));
+    let [x, y, w, h] = pane.rect();
+    parent
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(x),
+                top: Val::Px(y),
+                width: Val::Px(w),
+                height: Val::Px(h),
+                overflow: Overflow::clip(),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.04)),
+        ))
+        .with_children(|viewport| {
+            for slot in 0..ROWS {
                 text(
-                    body,
-                    list_title_rect(list),
+                    viewport,
+                    pane.row_rect(slot),
                     "",
                     14.0,
-                    GOLD,
-                    ColumnTitle(list),
+                    INK,
+                    RowText { pane, slot },
                 );
-                body.spawn((
-                    Node {
-                        position_type: PositionType::Absolute,
-                        left: Val::Px(list_rect(list)[0]),
-                        top: Val::Px(list_rect(list)[1]),
-                        width: Val::Px(list_rect(list)[2]),
-                        height: Val::Px(list_rect(list)[3]),
-                        overflow: Overflow::clip(),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.04)),
-                ))
-                .with_children(|viewport| {
-                    for slot in 0..ROWS {
-                        let [x, y, w, h] = row_rect(list, slot);
-                        let [vx, vy, _, _] = list_rect(list);
-                        text(
-                            viewport,
-                            [x - vx, y - vy, w, h],
-                            "",
-                            14.0,
-                            INK,
-                            RowText { list, slot },
-                        );
-                    }
-                });
-                let [bx, by, bw, bh] = bar_rect(list);
-                body.spawn((
-                    Node {
-                        position_type: PositionType::Absolute,
-                        left: Val::Px(bx),
-                        top: Val::Px(by),
-                        width: Val::Px(bw),
-                        height: Val::Px(bh),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.06)),
-                ))
-                .with_children(|track| {
-                    track.spawn((
-                        ScrollThumb(list),
-                        Node {
-                            position_type: PositionType::Absolute,
-                            left: Val::Px(0.0),
-                            top: Val::Px(0.0),
-                            width: Val::Percent(100.0),
-                            height: Val::Px(bh),
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.72, 0.76, 0.86)),
-                    ));
-                });
             }
+        });
+    let [bx, by, bw, bh] = pane.bar_rect();
+    parent
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(bx),
+                top: Val::Px(by),
+                width: Val::Px(bw),
+                height: Val::Px(bh),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.06)),
+        ))
+        .with_children(|track| {
+            track.spawn((
+                ScrollThumb(pane),
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    top: Val::Px(0.0),
+                    width: Val::Percent(100.0),
+                    height: Val::Px(bh),
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.72, 0.76, 0.86)),
+            ));
         });
 }
 
@@ -671,9 +909,8 @@ fn developer_page(panel: &mut ChildSpawnerCommands) {
         ))
         .with_children(|body| {
             text(body, [PAD, BODY_Y, 900.0, 56.0], "", 15.0, INK, DevStatus);
-            for (action, rect, label) in BUTTONS {
+            for (_, rect, label) in BUTTONS {
                 button(body, *rect, label, FixedText);
-                let _ = action;
             }
             for (action, label, rect) in SLIDERS {
                 text(
@@ -806,51 +1043,55 @@ pub(crate) fn menu_keys(
         set_cursor_grab(true, &mut cursor);
         return;
     }
-    if keys.just_pressed(KeyCode::BracketLeft) {
-        menu.page = Page::Character;
-        return;
-    }
-    if keys.just_pressed(KeyCode::BracketRight) {
-        menu.page = Page::Developer;
+    if keys.just_pressed(KeyCode::BracketLeft) || keys.just_pressed(KeyCode::BracketRight) {
+        let back = keys.just_pressed(KeyCode::BracketLeft);
+        let at = PAGES
+            .iter()
+            .position(|page| *page == menu.page)
+            .unwrap_or(0);
+        menu.page = PAGES[if back {
+            (at + PAGES.len() - 1) % PAGES.len()
+        } else {
+            (at + 1) % PAGES.len()
+        }];
+        menu.focus_page();
         return;
     }
 
     let up = keys.just_pressed(KeyCode::ArrowUp);
     let down = keys.just_pressed(KeyCode::ArrowDown);
+    let page = if keys.just_pressed(KeyCode::PageUp) {
+        Some(true)
+    } else if keys.just_pressed(KeyCode::PageDown) {
+        Some(false)
+    } else {
+        None
+    };
+    let end = if keys.just_pressed(KeyCode::Home) {
+        Some(false)
+    } else if keys.just_pressed(KeyCode::End) {
+        Some(true)
+    } else {
+        None
+    };
     match menu.page {
+        Page::Map => menu.walk(up, down, page, end),
         Page::Character => {
-            if keys.just_pressed(KeyCode::ArrowLeft) {
-                menu.column = (menu.column + LISTS - 1) % LISTS;
-                let column = menu.column;
-                menu.scroll_into_view(column);
+            if keys.just_pressed(KeyCode::ArrowLeft) || keys.just_pressed(KeyCode::ArrowRight) {
+                let back = keys.just_pressed(KeyCode::ArrowLeft);
+                let at = CHARACTER_PANES
+                    .iter()
+                    .position(|pane| *pane == menu.focus)
+                    .unwrap_or(0);
+                menu.focus = CHARACTER_PANES[if back {
+                    (at + LISTS - 1) % LISTS
+                } else {
+                    (at + 1) % LISTS
+                }];
+                let pane = menu.focus;
+                menu.scroll_into_view(pane);
             }
-            if keys.just_pressed(KeyCode::ArrowRight) {
-                menu.column = (menu.column + 1) % LISTS;
-                let column = menu.column;
-                menu.scroll_into_view(column);
-            }
-            if up || down {
-                let column = menu.column;
-                menu.step(column, up);
-                menu.clamp();
-                menu.scroll_into_view(column);
-            }
-            if keys.just_pressed(KeyCode::PageUp) {
-                menu.page_step(true);
-            }
-            if keys.just_pressed(KeyCode::PageDown) {
-                menu.page_step(false);
-            }
-            if keys.just_pressed(KeyCode::Home) {
-                let column = menu.column;
-                menu.pick(column, 0);
-                menu.scroll_into_view(column);
-            }
-            if keys.just_pressed(KeyCode::End) {
-                let column = menu.column;
-                menu.pick(column, usize::MAX);
-                menu.scroll_into_view(column);
-            }
+            menu.walk(up, down, page, end);
         }
         Page::Developer => {
             if up || down {
@@ -914,9 +1155,10 @@ pub(crate) fn menu_pointer(
     let released = buttons.just_released(MouseButton::Left);
 
     if clicked {
-        for (index, page) in [Page::Character, Page::Developer].iter().enumerate() {
+        for (index, page) in PAGES.iter().enumerate() {
             if hit(tab_rect(index), at) {
                 menu.page = *page;
+                menu.focus_page();
             }
         }
         if hit(close_rect(), at) {
@@ -928,22 +1170,24 @@ pub(crate) fn menu_pointer(
     }
 
     match menu.page {
-        Page::Character => {
-            for list in 0..LISTS {
-                if lines != 0.0 && hit(list_rect(list), at) {
-                    menu.scroll_by(list, -lines.round() as i32);
+        Page::Map | Page::Character => {
+            for pane in panes(menu.page) {
+                let rect = pane.rect();
+                if lines != 0.0 && hit(rect, at) {
+                    menu.scroll_by(*pane, -lines.round() as i32);
                 }
-                if clicked && hit(list_rect(list), at) {
-                    menu.column = list;
-                    let slot = ((at.y - list_rect(list)[1]) / ROW) as usize;
-                    let index = item_at(menu.scroll[list], slot);
-                    if index >= 0 && (index as usize) < menu.count(list) {
-                        menu.pick(list, index as usize);
+                if clicked && hit(rect, at) {
+                    menu.focus = *pane;
+                    let slot = ((at.y - rect[1]) / ROW) as usize;
+                    let index = item_at(menu.scroll_of(*pane), slot);
+                    if index >= 0 && (index as usize) < menu.count(*pane) {
+                        menu.pick(*pane, index as usize);
                     }
                 }
-                if pressed && hit(bar_rect(list), at) {
-                    let total = menu.count(list) as i32;
-                    menu.scroll[list] = scroll_from_bar(total, at.y - bar_rect(list)[1]);
+                if pressed && hit(pane.bar_rect(), at) {
+                    let total = menu.count(*pane) as i32;
+                    let scroll = scroll_from_bar(total, at.y - pane.bar_rect()[1]);
+                    menu.set_scroll(*pane, scroll);
                 }
             }
         }
@@ -1019,7 +1263,7 @@ pub(crate) fn place_menu(
     }
 }
 
-/// Show the page that is selected and hide the other.
+/// Show the page that is selected and hide the others.
 pub(crate) fn draw_pages(menu: Res<Menu>, mut bodies: Query<(&mut Visibility, &PageBody)>) {
     for (mut visibility, body) in &mut bodies {
         let wanted = if body.0 == menu.page {
@@ -1057,25 +1301,26 @@ pub(crate) fn draw_tabs(
     }
 }
 
-/// Fill the visible rows of each list from the highlight and the scroll, and pick out the
-/// highlighted row of the focused list.
+/// Fill the visible rows of every list from its highlight and scroll, and pick out the highlighted
+/// row of the focused list.
 pub(crate) fn draw_rows(menu: Res<Menu>, mut titles: TitleQuery, mut rows: RowQuery) {
     for (mut node, title) in &mut titles {
-        let list = title.0;
-        let marked = if list == menu.column { ">" } else { " " };
-        let rendered = format!("{marked} {} ({})", LIST_NAMES[list], menu.count(list));
+        let pane = title.0;
+        let marked = if pane == menu.focus { ">" } else { " " };
+        let rendered = format!("{marked} {} ({})", pane.name(), menu.count(pane));
         if node.0 != rendered {
             node.0 = rendered;
         }
     }
     for (mut node, mut colour, row) in &mut rows {
-        let index = item_at(menu.scroll[row.list], row.slot);
-        let count = menu.count(row.list) as i32;
+        let pane = row.pane;
+        let index = item_at(menu.scroll_of(pane), row.slot);
+        let count = menu.count(pane) as i32;
         let (rendered, wanted) = if index < 0 || index >= count {
             (String::new(), DIM)
         } else {
-            let selected = menu.picked[row.list] == index as usize;
-            let marked = if selected && row.list == menu.column {
+            let selected = menu.selected(pane) == index as usize;
+            let marked = if selected && pane == menu.focus {
                 ">"
             } else if selected {
                 "*"
@@ -1083,7 +1328,7 @@ pub(crate) fn draw_rows(menu: Res<Menu>, mut titles: TitleQuery, mut rows: RowQu
                 " "
             };
             (
-                format!("{marked} {}", menu.label(row.list, index as usize)),
+                format!("{marked} {}", menu.label(pane, index as usize)),
                 if selected { GOLD } else { INK },
             )
         };
@@ -1104,27 +1349,54 @@ type TitleQuery<'w, 's> =
     Query<'w, 's, (&'static mut Text, &'static ColumnTitle), Without<RowText>>;
 /// The career line, the slider values, the slider fills and the hint line all live on the developer
 /// page; each is a separate query, so each is told apart from the others by what it marks.
-type StatusQuery<'w, 's> =
-    Query<'w, 's, &'static mut Text, (With<DevStatus>, Without<SliderValue>, Without<HintText>)>;
+type StatusQuery<'w, 's> = Query<
+    'w,
+    's,
+    &'static mut Text,
+    (
+        With<DevStatus>,
+        Without<SliderValue>,
+        Without<HintText>,
+        Without<MapDetail>,
+    ),
+>;
 type ValueQuery<'w, 's> = Query<'w, 's, (&'static mut Text, &'static SliderValue)>;
 type FillQuery<'w, 's> = Query<'w, 's, (&'static mut Node, &'static SliderFill)>;
-type HintQuery<'w, 's> =
-    Query<'w, 's, &'static mut Text, (With<HintText>, Without<DevStatus>, Without<SliderValue>)>;
-
-/// The four lists' names, in column order.
-const LIST_NAMES: [&str; LISTS] = ["CHARACTER", "BODY SKIN", "HEAD", "FACE"];
+type HintQuery<'w, 's> = Query<
+    'w,
+    's,
+    &'static mut Text,
+    (
+        With<HintText>,
+        Without<DevStatus>,
+        Without<SliderValue>,
+        Without<MapDetail>,
+    ),
+>;
+/// The map page's detail line, told apart from the hint and the career line it shares text with.
+type DetailQuery<'w, 's> = Query<
+    'w,
+    's,
+    &'static mut Text,
+    (
+        With<MapDetail>,
+        Without<DevStatus>,
+        Without<SliderValue>,
+        Without<HintText>,
+    ),
+>;
 
 /// Size each list's scrollbar thumb to the list, and place it at the scroll.
 pub(crate) fn draw_scrollbars(menu: Res<Menu>, mut thumbs: Query<(&mut Node, &ScrollThumb)>) {
     for (mut node, thumb) in &mut thumbs {
-        let list = thumb.0;
-        let total = menu.count(list) as i32;
+        let pane = thumb.0;
+        let total = menu.count(pane) as i32;
         let (height, top) = if total <= ROWS as i32 {
             (VAL_ZERO, VAL_ZERO)
         } else {
             let travel = max_scroll(total);
             let thumb_h = (LIST_H * ROWS as f32 / total as f32).max(24.0);
-            let offset = (LIST_H - thumb_h) * menu.scroll[list] as f32 / travel as f32;
+            let offset = (LIST_H - thumb_h) * menu.scroll_of(pane) as f32 / travel as f32;
             (Val::Px(thumb_h), Val::Px(offset))
         };
         if node.height != height {
@@ -1138,6 +1410,37 @@ pub(crate) fn draw_scrollbars(menu: Res<Menu>, mut thumbs: Query<(&mut Node, &Sc
 
 /// A zero-height thumb, for a list that fits without scrolling.
 const VAL_ZERO: Val = Val::Px(0.0);
+
+/// Show the highlighted map's own art and what the install says about it.
+pub(crate) fn draw_map(
+    menu: Res<Menu>,
+    previews: Res<Previews>,
+    mut frames: Query<&mut ImageNode, With<MapPreview>>,
+    mut details: DetailQuery,
+) {
+    let Some(row) = menu.map_row() else {
+        return;
+    };
+    let wanted = previews.handle(&row.map.id);
+    for mut frame in &mut frames {
+        let current = frame.image.id();
+        let next = wanted.as_ref().map(Handle::id).unwrap_or_default();
+        if current != next {
+            frame.image = wanted.clone().unwrap_or_default();
+        }
+    }
+    let targets = if row.map.targets {
+        "practice targets stand here"
+    } else {
+        "no practice targets — they stand on the dev arena"
+    };
+    let rendered = format!("{}\n{targets}", row.detail);
+    for mut detail in &mut details {
+        if detail.0 != rendered {
+            detail.0 = rendered.clone();
+        }
+    }
+}
 
 /// Keep the developer page's readouts current, and show which slider the arrows act on.
 pub(crate) fn draw_dev(
@@ -1164,7 +1467,7 @@ pub(crate) fn draw_dev(
                 rank.map(|r| r.title.clone()).unwrap_or_default(),
                 career.progression().prestige(),
                 career.progression().xp_in_rank(),
-                "the character page's lists scroll; every choice previews on the character",
+                "the character page's lists scroll; every choice previews as it is highlighted",
             )
         } else {
             "no rank table: the career and its HUD stay hidden".to_owned()
@@ -1200,26 +1503,31 @@ fn value_of(settings: &Settings, action: Action) -> f32 {
 mod tests {
     use super::*;
     use crate::catalog::{Character, Skin, Variant};
+    use spdesc_game_core::{DEV_MAP, GameMap};
 
-    /// The four viewports and their scrollbars sit inside the panel and never overlap: a control
+    /// Every list of every page and its scrollbar sit inside the panel and never overlap: a control
     /// that falls outside could never be clicked, and an overlap would hide one of the two.
     #[test]
     fn the_lists_and_their_scrollbars_fit_inside_the_panel() {
-        for list in 0..LISTS {
-            for rect in [list_title_rect(list), list_rect(list), bar_rect(list)] {
+        for pane in PAGES.iter().flat_map(|page| panes(*page)) {
+            for rect in [pane.title_rect(), pane.rect(), pane.bar_rect()] {
                 assert!(rect[0] >= 0.0 && rect[1] >= 0.0);
                 assert!(
                     rect[0] + rect[2] <= PANEL_SIZE.x && rect[1] + rect[3] <= PANEL_SIZE.y,
-                    "list {list} runs past the panel"
+                    "{pane:?} runs past the panel"
                 );
             }
-            assert!(list_rect(list)[1] + list_rect(list)[3] < HINT_Y);
+            assert!(pane.rect()[1] + pane.rect()[3] < HINT_Y);
         }
-        for a in 0..LISTS {
-            for b in a + 1..LISTS {
+        for a in CHARACTER_PANES {
+            for b in CHARACTER_PANES {
+                if a == b {
+                    continue;
+                }
                 assert!(
-                    list_rect(a)[0] + list_rect(a)[2] <= list_rect(b)[0],
-                    "lists {a} and {b} overlap"
+                    a.rect()[0] + a.rect()[2] <= b.rect()[0]
+                        || b.rect()[0] + b.rect()[2] <= a.rect()[0],
+                    "{a:?} and {b:?} overlap"
                 );
             }
         }
@@ -1229,25 +1537,44 @@ mod tests {
     /// bottom edge.
     #[test]
     fn the_rows_tile_their_viewport() {
-        for list in 0..LISTS {
-            let [_, y, _, h] = list_rect(list);
-            let first = row_rect(list, 0);
-            let last = row_rect(list, ROWS - 1);
-            assert_eq!(first[1], y);
-            assert_eq!(last[1] + last[3], y + h);
+        for pane in PAGES.iter().flat_map(|page| panes(*page)) {
+            let [_, _, _, h] = pane.rect();
+            let first = pane.row_rect(0);
+            let last = pane.row_rect(ROWS - 1);
+            assert_eq!(
+                first[1], 0.0,
+                "rows are placed from the viewport's own corner"
+            );
+            assert_eq!(last[1] + last[3], h);
             for slot in 0..ROWS {
-                assert_eq!(row_rect(list, slot)[3], ROW);
-                assert_eq!(row_rect(list, slot)[1], y + slot as f32 * ROW);
+                assert_eq!(pane.row_rect(slot)[3], ROW);
+                assert_eq!(pane.row_rect(slot)[1], slot as f32 * ROW);
             }
             // The scrollbar sits beside the rows, not over them.
-            assert!(bar_rect(list)[0] >= list_rect(list)[0] + list_rect(list)[2]);
+            assert!(pane.bar_rect()[0] >= pane.rect()[0] + pane.rect()[2]);
         }
     }
 
-    /// The tabs and the Close button sit in the tab row and never overlap each other.
+    /// The map page's preview sits inside the panel, clear of the list it belongs to.
+    #[test]
+    fn the_map_preview_fits_beside_its_list() {
+        let list = Pane::Map.rect();
+        let [px, py, pw, ph] = preview_rect();
+        assert!(px >= list[0] + list[2], "the preview overlaps the map list");
+        assert!(py >= BODY_Y);
+        assert!(px + pw <= PANEL_SIZE.x - PAD + 0.001);
+        assert!(py + ph + 48.0 <= HINT_Y);
+        assert!(
+            (pw / ph - 16.0 / 9.0).abs() < 0.001,
+            "the preview is not a 16:9 frame"
+        );
+    }
+
+    /// The tab row holds a tab for every page and the Close button, and they never overlap.
     #[test]
     fn the_tab_row_holds_the_tabs_and_the_close_button() {
-        let mut rects = vec![tab_rect(0), tab_rect(1), close_rect()];
+        let mut rects: Vec<[f32; 4]> = (0..PAGES.len()).map(tab_rect).collect();
+        rects.push(close_rect());
         for rect in &rects {
             assert_eq!(rect[1], TABS_Y);
             assert_eq!(rect[3], TAB_H);
@@ -1344,7 +1671,7 @@ mod tests {
         assert_eq!(max_scroll(30), 30 - ROWS as i32);
     }
 
-    /// A menu of `n` items per list, for the navigation tests.
+    /// A menu of `n` items per character list, for the navigation tests.
     fn menu_of(n: usize) -> Menu {
         let skins = (0..n)
             .map(|i| Skin {
@@ -1379,91 +1706,158 @@ mod tests {
         menu
     }
 
+    /// A row as the map module builds one, without needing an install.
+    fn map_row(id: &str, title: &str, targets: bool) -> MapRow {
+        MapRow {
+            map: GameMap {
+                id: id.to_owned(),
+                title: title.to_owned(),
+                targets,
+            },
+            preview: None,
+            detail: String::new(),
+        }
+    }
+
+    /// The menu opens on the map page, and the map page is the first tab.
+    #[test]
+    fn the_menu_opens_on_the_map() {
+        let menu = Menu::default();
+        assert_eq!(menu.page, Page::Map);
+        assert_eq!(menu.focus, Pane::Map);
+        assert_eq!(PAGES[0], Page::Map);
+        assert_eq!(PAGES.len(), 3);
+    }
+
+    /// A map choice is saved by id and comes back, and an id the catalogue does not hold lands on
+    /// the project's own map rather than on nothing.
+    #[test]
+    fn a_map_choice_round_trips_and_an_unknown_id_lands_on_the_default() {
+        let rows = vec![
+            map_row(DEV_MAP, "Dev arena", true),
+            map_row("mp_rust", "Rust", false),
+            map_row("mp_terminal", "Terminal", false),
+        ];
+        let mut menu = Menu::default();
+        menu.fill_maps(rows, "mp_terminal");
+        assert_eq!(menu.map_pick, 2);
+        assert_eq!(menu.saved_map(), "mp_terminal");
+        assert_eq!(menu.chosen_map(), ("Terminal".to_owned(), false));
+        assert_eq!(menu.count(Pane::Map), 3);
+        assert_eq!(menu.label(Pane::Map, 1), "Rust");
+
+        // The project's own map is what a fresh game and an unknown choice both land on.
+        let mut fresh = Menu::default();
+        fresh.fill_maps(
+            vec![
+                map_row(DEV_MAP, "Dev arena", true),
+                map_row("mp_rust", "Rust", false),
+            ],
+            "",
+        );
+        assert_eq!(fresh.map_pick, 0);
+        assert_eq!(fresh.chosen_map(), ("Dev arena".to_owned(), true));
+        let mut unknown = Menu::default();
+        unknown.fill_maps(
+            vec![
+                map_row(DEV_MAP, "Dev arena", true),
+                map_row("mp_rust", "Rust", false),
+            ],
+            "mp_vacant",
+        );
+        assert_eq!(
+            unknown.map_pick, 0,
+            "a map this install lacks is the default"
+        );
+        assert!(unknown.chosen_map().1, "which is where the targets stand");
+    }
+
     /// Stepping past either end of a long list scrolls it, and comes back: the highlight is never
     /// left off screen.
     #[test]
     fn the_scroll_follows_the_highlight() {
         let mut menu = menu_of(60);
-        menu.column = 2;
-        assert_eq!(menu.scroll[2], 0);
+        menu.focus = Pane::Character(2);
+        assert_eq!(menu.scroll_of(Pane::Character(2)), 0);
         for _ in 0..ROWS {
-            menu.step(2, false);
+            menu.step(Pane::Character(2), false);
         }
-        menu.scroll_into_view(2);
+        menu.scroll_into_view(Pane::Character(2));
+        let head = Pane::Character(2);
         assert_eq!(
-            menu.scroll[2], 1,
+            menu.scroll_of(head),
+            1,
             "one past the last visible row scrolls by one"
         );
-        assert!((menu.picked[2] as i32) < menu.scroll[2] + ROWS as i32);
+        assert!((menu.selected(head) as i32) < menu.scroll_of(head) + ROWS as i32);
         for _ in 0..ROWS {
-            menu.step(2, true);
+            menu.step(head, true);
         }
-        menu.scroll_into_view(2);
+        menu.scroll_into_view(head);
         assert_eq!(
-            menu.scroll[2], 0,
+            menu.scroll_of(head),
+            0,
             "walking back up to the top brings the scroll with it"
         );
         // And the scroll can never run past the end of the list.
         for _ in 0..200 {
-            menu.scroll_by(2, 1);
+            menu.scroll_by(head, 1);
         }
-        assert_eq!(menu.scroll[2], max_scroll(60));
+        assert_eq!(menu.scroll_of(head), max_scroll(60));
     }
 
     /// A pageful moves both the highlight and the scroll, and stops at the ends.
     #[test]
     fn a_page_step_moves_the_highlight_and_the_scroll() {
         let mut menu = menu_of(60);
-        menu.column = 1;
+        let skin = Pane::Character(1);
+        menu.focus = skin;
         menu.page_step(false);
-        assert_eq!(menu.picked[1], ROWS);
-        assert_eq!(menu.scroll[1], ROWS as i32);
+        assert_eq!(menu.selected(skin), ROWS);
+        assert_eq!(menu.scroll_of(skin), ROWS as i32);
         for _ in 0..10 {
             menu.page_step(false);
         }
-        assert_eq!(menu.picked[1], 59, "the last item, not past it");
+        assert_eq!(menu.selected(skin), 59, "the last item, not past it");
         menu.page_step(true);
-        assert_eq!(menu.picked[1], 59 - ROWS);
+        assert_eq!(menu.selected(skin), 59 - ROWS);
         assert_eq!(
-            menu.scroll[1],
+            menu.scroll_of(skin),
             59 - 2 * ROWS as i32 + 1,
             "a page up from the end puts the highlight on the last visible row"
         );
     }
 
     /// Switching to a shorter list leaves the highlight inside it, and the prefetch follows the
-    /// focused list in both directions.
+    /// focused character list in both directions — and does nothing on the map page.
     #[test]
     fn the_highlight_is_kept_inside_its_list_and_the_prefetch_follows_the_focus() {
-        let mut menu = menu_of(4);
-        menu.column = 1;
-        menu.picked[1] = 3;
-        // A character whose lists are shorter: the highlight clamps rather than pointing past the
-        // end of the list it no longer belongs to.
         let mut shorter = menu_of(2);
-        shorter.column = 1;
+        shorter.focus = Pane::Character(1);
         shorter.picked = [0, 3, 3, 3];
         shorter.clamp();
         assert_eq!(shorter.picked, [0, 1, 1, 1]);
 
+        let mut menu = menu_of(4);
         menu.picked = [0, 1, 0, 0];
-        menu.column = 1;
+        menu.focus = Pane::Character(1);
         let keys = menu.prefetch_keys();
         assert_eq!(keys.len(), 2);
         assert_eq!(keys[0].body, "body 0", "the previous skin");
         assert_eq!(keys[1].body, "body 2", "the next skin");
         assert_eq!(keys[0].head, "head mesh 0", "at the current head");
 
-        menu.column = 3;
+        menu.focus = Pane::Character(3);
         let keys = menu.prefetch_keys();
         assert_eq!(keys[0].face_dir.as_deref(), Some("face dir 3"));
         assert_eq!(keys[1].face_dir.as_deref(), Some("face dir 1"));
 
-        // A one-item list has no neighbours to prefetch, and asking for them must not loop back
-        // onto itself.
+        // A one-item list has no neighbours to prefetch, and a map has no model at all.
         let mut single = menu_of(1);
-        single.column = 2;
+        single.focus = Pane::Character(2);
         assert!(single.prefetch_keys().is_empty());
+        menu.focus = Pane::Map;
+        assert!(menu.prefetch_keys().is_empty());
     }
 
     /// The key the highlight resolves to carries the head and face the lists point at, with the
@@ -1507,5 +1901,29 @@ mod tests {
             face: "face 1".to_string(),
         });
         assert_eq!(menu.picked, [0, 2, 0, 1]);
+    }
+
+    /// Changing page leaves the focus on a list that page actually shows, so the arrows are never
+    /// walking something invisible.
+    #[test]
+    fn the_focus_stays_on_a_list_the_page_shows() {
+        let mut menu = Menu {
+            focus: Pane::Character(2),
+            page: Page::Map,
+            ..Default::default()
+        };
+        menu.focus_page();
+        assert_eq!(menu.focus, Pane::Map);
+        menu.page = Page::Character;
+        menu.focus_page();
+        assert_eq!(menu.focus, Pane::Character(0), "the first list of the page");
+        menu.page = Page::Developer;
+        menu.focus_page();
+        assert_eq!(
+            menu.focus,
+            Pane::Character(0),
+            "the developer page has no list"
+        );
+        assert!(panes(Page::Developer).is_empty());
     }
 }

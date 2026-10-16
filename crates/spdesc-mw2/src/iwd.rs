@@ -139,6 +139,30 @@ pub fn read_from(archive: &Path, entry: &str) -> Result<Option<Vec<u8>>, Error> 
     Ok(None)
 }
 
+/// Every entry name in the archives whose lowercased name contains `needle`, sorted and
+/// deduplicated. This walks only each archive's central directory, so it is cheap even for the
+/// hundred-megabyte ones.
+pub fn entry_names(install: &Path, needle: &str) -> Vec<String> {
+    let needle = needle.to_ascii_lowercase();
+    let mut names = Vec::new();
+    for archive in archives(install) {
+        let Ok(mut reader) = Archive::open(&archive) else {
+            continue;
+        };
+        let Some(records) = reader.records() else {
+            continue;
+        };
+        for record in records {
+            if record.name.to_ascii_lowercase().contains(&needle) {
+                names.push(record.name);
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// One central-directory record: where an entry's data is and how it is stored.
 #[derive(Debug, Clone)]
 struct Record {
