@@ -149,46 +149,73 @@ walks on is the map's playable shape, measured above in units rather than by its
 a collision hull rather than the drawn world — no props or material detail — which is why they are
 used for placement rather than displayed in place of the world surfaces.
 
-## Standing and walking on the collision
+## Standing and walking on a map
 
-The clipmap drives the player, not just the map's placement. Its triangles are converted to the
-simulation's own frame and units (the inch becomes centimetre), the chosen spawn becomes the origin,
-and then two queries run every frame (`spdesc_game_core::collision`):
+The player walks on the map, and its **floor and walls come from different places**.
+
+The **floor** is the *drawn world's* surfaces. The clipmap's own triangle list is terrain, and on a
+map built out of brushes it is not the map at all: Terminal carries **14 199 brushes** against
+Rust's 2 668, and its triangle floors leave the terminal's interior bare — a walker fell through it
+after ten metres. The drawn surfaces are continuous on every map and are the floor the player can
+*see*, so that is the floor they stand on.
+
+The **walls** are the clipmap's, because the drawn world's decoration — railings, pipes, cables —
+would catch a player the game lets through. A live run on Rust with the drawn world's walls instead
+had the walker pinned against a pipe for six seconds.
+
+Both meshes are converted to the simulation's frame and units (the inch becomes centimetre), and
+then two queries run every frame (`spdesc_game_core::collision`):
 
 - **The floor** under the player is the highest floor-oriented triangle within a capsule's width of
   it and no more than a step (55 cm) above the feet, so a walker steps onto a stair or a kerb, climbs
-  a slope, and falls off a ledge. A ceiling is not a floor, and neither is a triangle above the
-  reachable band.
+  a slope, and falls off a ledge. A ceiling is not a floor.
 - **The walls** push a vertical capsule out of anything beside it. A step short enough that the floor
-  query would lift the walker onto it is *not* a wall, or stairs would be a wall — that was the first
-  thing the live run showed: the player pinned against a stair riser, moving two centimetres a second.
+  query would lift the walker onto it is *not* a wall, or stairs would be a wall — the first live run
+  had the player pinned against a stair riser, moving two centimetres a second.
+
+**Walking down uneven ground is walking, not falling.** Ground is not a plane, so a walker already on
+it keeps it across a drop no deeper than a step (45 cm, `MovementParams::step_down`), and only a
+short airtime (0.12 s) counts as a landing. Without both, every few centimetres of a slope left the
+feet for a frame and played the landing — the character knelt its way across Rust.
 
 A walker that leaves the map — off an edge with nothing below — falls past the hull's lowest point
 and is put back on the spot the map stands around, so a map's void ends the fall.
 
-**Where the map is stood is asked of the collision itself.** A map has several levels — a floor, a
-roof, a stairwell — and the clipmap's walkable flag does not say which of them a player can walk
-*around* in. So a grid of spots over the map is asked for the floor above it, the level that most of
-those spots stand on wins, and the spot with the most ground on every side on that level is the
-anchor. Three earlier attempts are worth recording because they looked reasonable and were not: the
-nearest triangle to a plain median of the walkable ground falls in a gap between two wings next to
-nothing; the busiest patch by triangle count lands in a stairwell; and picking a level by the area of
-its floor still cannot tell a big roof from a big floor.
+**The map is stood on one of its own spawn points.** A map's entity text (`map_ents`) lists where the
+game places a player — `mp_dm_spawn`, `mp_tdm_spawn`, `mp_dd_spawn_attacker` and the like, each with
+an `origin` — so the anchor is a spawn, taken from the middle outwards, on the floor beneath it. That
+is the map's own answer to "where does a player stand", which the clipmap's walkable flags do not
+give: those name every floor, roof and stairwell alike.
 
-**The floor is continuous enough to walk on**, measured by sampling the query on a grid within thirty
-metres of the spawn and counting the spots with floor under them:
+What came before is worth recording because it looked reasonable and was worse. The anchor was first
+chosen to *maximise floor coverage* — the level most grid spots stood on, then the busiest patch on
+it — and it worked by its own measure and failed in play: it put the player on a large flat plane
+*outside* the map, because the biggest, flattest floor is often not the playable one, and the
+coverage figure was measured around the very spot it had chosen. Spawn points fixed the place; the
+drawn world fixed the floor.
+
+Measured afterwards — the share of a grid within thirty metres of the spawn with floor under it, from
+the drawn world:
 
 | map | floor coverage |
 | --- | --- |
 | `mp_rust` | 100% |
+| `mp_terminal` | 100% |
 | `mp_highrise` | 100% |
 | `mp_favela` | 100% |
-| `mp_subbase` | 100% |
-| `mp_estate` | 83% |
-| `mp_terminal` | 70% |
+| `mp_subbase` | 82% |
+| `mp_estate` | 53% |
 
-Terminal was 20% before the anchor was asked of the collision, and is 70% now; the rest is its
-clipmap's own sparse floor. A walker that leaves it falls and is returned to the spawn.
+Estate's figure is a manor of several levels: the grid is a flat slice, and a slice through a
+staircase is half air. It is not the same as falling through.
+
+### What the collision still is not
+
+The clipmap's **brushes** — the convex solids most buildings' collision is made of — are not read.
+Their planes are there (`brush_sides` names them) but turning a set of half-spaces into the solid a
+capsule collides with is its own piece of work, and it is what the walls of a brush-heavy map want.
+Until then a map's walls are its clipmap triangles, and where those run out a walker passes through.
+
 
 ## What is not read
 

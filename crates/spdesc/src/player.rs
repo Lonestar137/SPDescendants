@@ -105,6 +105,10 @@ pub struct Animator {
 const BLEND_SECONDS: f32 = 0.18;
 /// Seconds the aim pose takes to raise into and back out of the upper body.
 const ADS_SECONDS: f32 = 0.14;
+/// Seconds in the air before a touchdown is a *landing* rather than a bump. Uneven ground leaves
+/// the feet for a frame or two; that is not a fall, and playing a landing for it makes a walk over
+/// a slope look like a walk over hot coals.
+const MIN_LANDING_AIR: f32 = 0.12;
 /// The bone the aim layer starts at; it and its descendants take the aim pose.
 const UPPER_BODY_ROOT: &str = "Bip001-Spine1";
 /// How far the upper body may pitch to follow the camera, radians.
@@ -222,13 +226,17 @@ pub fn animate_locomotion(
         let land_duration = clip_duration(&animator.clips[loco.land]);
 
         if grounded {
-            if !animator.was_grounded {
+            // A landing is a fall, not a bump: a walker that grazed the air for a frame or two
+            // keeps walking rather than playing a landing, so uneven ground does not kneel.
+            if !animator.was_grounded && animator.air_timer >= MIN_LANDING_AIR {
                 animator.land_timer = land_duration;
                 audio::play(&mut commands, &sounds.land, 0.6);
             }
             animator.air_timer = 0.0;
         } else {
-            if animator.was_grounded {
+            // And the takeoff cue only for a jump — a walker whose ground merely fell away is not
+            // jumping.
+            if animator.was_grounded && velocity[2] > 0.0 {
                 audio::play(&mut commands, &sounds.jump, 0.5);
             }
             animator.air_timer += dt;
@@ -606,9 +614,11 @@ pub fn drive_player(
         // The floor under the player: the map's own collision when one is standing, or the flat
         // plane the project's own arena is. With no floor within a step the walker is airborne and
         // gravity takes it.
-        let collision = collision.0.as_ref();
-        let ground = match collision {
-            Some(collision) => collision
+        // The floor stance is the drawn world's surfaces; the walls are the clipmap's. Either may
+        // be absent — the project's own arena is a flat plane at zero and has neither.
+        let floor = collision.floor.as_ref().or(collision.walls.as_ref());
+        let ground = match floor {
+            Some(floor) => floor
                 .ground(player.character.position, PLAYER_RADIUS)
                 .unwrap_or(f64::NEG_INFINITY),
             None => 0.0,
@@ -618,12 +628,12 @@ pub fn drive_player(
             .step(&params, intent, frame_yaw, ground, dt);
         // And the walls: the capsule is pushed back out of whatever it has run into, so a room has
         // walls rather than a map-shaped hole in them.
-        if let Some(collision) = collision {
+        if let Some(walls) = collision.walls.as_ref().or(collision.floor.as_ref()) {
             player.character.position =
-                collision.slide(player.character.position, PLAYER_RADIUS, PLAYER_HEIGHT);
+                walls.slide(player.character.position, PLAYER_RADIUS, PLAYER_HEIGHT);
             // A walker that has left the map — off a ledge with nothing below — falls past the
             // hull's lowest point and is put back on the spot the map stands around.
-            if let Some(lowest) = collision.lowest()
+            if let Some(lowest) = walls.lowest()
                 && player.character.position[2] < lowest - RESPAWN_BELOW
             {
                 player.character = Character::default();

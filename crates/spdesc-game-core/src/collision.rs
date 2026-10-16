@@ -104,7 +104,14 @@ impl Collision {
     /// stair and what a floor above cannot do (a ceiling is not a place to stand). The reach is the
     /// width of a capsule, so a foot does not fall through the seam between two floor faces.
     pub fn ground(&self, at: [f64; 3], reach: f64) -> Option<f64> {
-        let mut best: Option<f64> = None;
+        self.floor_point(at, reach).map(|point| point[2])
+    }
+
+    /// The point of the floor under `at`, within `reach` horizontally: the closest point of the
+    /// highest floor triangle the spot is over or near. Anchoring on this point rather than on a
+    /// spot that is *over* floor puts a map up with the player standing on it.
+    pub fn floor_point(&self, at: [f64; 3], reach: f64) -> Option<[f64; 3]> {
+        let mut best: Option<[f64; 3]> = None;
         for t in self.near(at[0], at[1], reach) {
             let (a, b, c) = self.corners(t);
             if !is_floor(a, b, c) {
@@ -118,8 +125,8 @@ impl Collision {
             let Some(z) = plane_height(a, b, c, closest[0], closest[1]) else {
                 continue;
             };
-            if z <= at[2] + STEP_UP && best.is_none_or(|b| z > b) {
-                best = Some(z);
+            if z <= at[2] + STEP_UP && best.is_none_or(|b| z > b[2]) {
+                best = Some([closest[0], closest[1], z]);
             }
         }
         best

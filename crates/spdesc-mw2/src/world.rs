@@ -731,6 +731,97 @@ impl ClipGeometry {
     }
 }
 
+/// A map's own spawn points: the origins its entity data places a player at.
+///
+/// The entity text is the map's own answer to "where does a player stand", which the clipmap's
+/// walkable flags do not give — those name every floor, roof and stairwell alike. It is a list of
+/// `{ "key" "value" … }` blocks, so this reads each block's `classname` and `origin` and keeps the
+/// origins of the blocks whose class names a spawn. `worldspawn` is the world itself, not a player.
+pub fn read_spawns(image: &ZoneImage) -> std::result::Result<Vec<[f32; 3]>, Error> {
+    let mut memory = image.memory();
+    let mut stream = memory.stream(image.bytes())?;
+    stream.push(XFILE_BLOCK_VIRTUAL)?;
+    let mut sink = Ignore;
+    let table = fastfile_iw4::open_asset_table(&mut stream)?;
+    for i in 0..table.count() {
+        let ty = table.kind(&stream, i)?;
+        let Some(slot) = table.slot(i) else { break };
+        if load_asset_at_observed(&mut stream, ty, slot, &mut sink).is_err() {
+            break;
+        }
+    }
+    stream.pop()?;
+    let Some(ents) = stream.map_ents() else {
+        return Ok(Vec::new());
+    };
+    let text = ents
+        .entity_string
+        .and_then(|p| stream.slice_at(p, 0, ents.entity_chars).ok())
+        .unwrap_or(&[]);
+    Ok(parse_spawns(&String::from_utf8_lossy(text)))
+}
+
+/// The origins of the spawn entities in an entity string.
+fn parse_spawns(text: &str) -> Vec<[f32; 3]> {
+    let mut spawns = Vec::new();
+    let mut class: Option<String> = None;
+    let mut origin: Option<[f32; 3]> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line == "{" {
+            class = None;
+            origin = None;
+            continue;
+        }
+        if line == "}" {
+            if origin.is_some()
+                && class.as_deref().is_some_and(|c| {
+                    c != "worldspawn" && (c.contains("spawn") || c.contains("player"))
+                })
+            {
+                spawns.push(origin.take().unwrap_or_default());
+            }
+            class = None;
+            origin = None;
+            continue;
+        }
+        let fields = quoted(line);
+        for pair in fields.chunks(2) {
+            let [key, value] = pair else { continue };
+            match *key {
+                "classname" => class = Some((*value).to_owned()),
+                "origin" => origin = parse_origin(value),
+                _ => {}
+            }
+        }
+    }
+    spawns
+}
+
+/// The quoted fields of one entity-file line, in order.
+fn quoted(line: &str) -> Vec<&str> {
+    let mut fields = Vec::new();
+    let mut rest = line;
+    while let Some(start) = rest.find('"') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('"') else { break };
+        fields.push(&after[..end]);
+        rest = &after[end + 1..];
+    }
+    fields
+}
+
+/// Three floats from an `origin` value, or `None` when it is not one.
+fn parse_origin(value: &str) -> Option<[f32; 3]> {
+    let mut numbers = value.split_whitespace().map(str::parse::<f32>);
+    let origin = [
+        numbers.next()?.ok()?,
+        numbers.next()?.ok()?,
+        numbers.next()?.ok()?,
+    ];
+    Some(origin)
+}
+
 /// Read the map zone's collision geometry.
 pub fn read_clip(image: &ZoneImage) -> std::result::Result<ClipGeometry, Error> {
     let mut memory = image.memory();

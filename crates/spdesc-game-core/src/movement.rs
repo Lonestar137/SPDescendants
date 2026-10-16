@@ -32,6 +32,12 @@ pub struct MovementParams {
     /// Turn rate toward the aim direction while aiming, degrees per second. Aiming turns the
     /// character onto its aim rather than its movement, and does so briskly.
     pub aim_turn_rate: f64,
+    /// How far below the feet the ground may fall while the character is still *walking* on it,
+    /// centimetres. Ground is not a plane: a sloped surface, a kerb walked down, a step in the
+    /// world's triangles all put the floor a little below where it was, and a walker that treated
+    /// each as a fall would spend the whole walk in the air — and the whole walk playing landings.
+    /// Anything further below than this is a ledge, and a walker falls off it.
+    pub step_down: f64,
 }
 
 impl Default for MovementParams {
@@ -47,6 +53,7 @@ impl Default for MovementParams {
             air_accel: 800.0,
             turn_rate: 720.0,
             aim_turn_rate: 1440.0,
+            step_down: 45.0,
         }
     }
 }
@@ -174,12 +181,19 @@ impl Character {
             self.position[axis] += self.velocity[axis] * dt;
         }
 
-        // Floor.
+        // Floor. A walker already on the ground keeps it across a drop no deeper than a step, so
+        // grounded ground does not turn into a fall — and a landing — every few centimetres. The
+        // snap only applies to a walker that was *on* the ground: one that has just jumped has
+        // left it, and one further above is falling.
         if self.position[2] <= ground_height + 1e-9 {
             self.position[2] = ground_height;
             if self.velocity[2] < 0.0 {
                 self.velocity[2] = 0.0;
             }
+            self.grounded = true;
+        } else if self.grounded && self.position[2] - ground_height <= params.step_down {
+            self.position[2] = ground_height;
+            self.velocity[2] = 0.0;
             self.grounded = true;
         } else {
             self.grounded = false;
@@ -328,6 +342,33 @@ mod tests {
             c.position[0].hypot(c.position[1]) > 0.0,
             "the character still strafes while aiming"
         );
+    }
+
+    /// Ground that steps *down* within a step is still walked on: the walker stays grounded and
+    /// does not fall, which is what keeps uneven ground from turning into a fall every step.
+    #[test]
+    fn a_step_down_keeps_the_walker_on_the_ground() {
+        let p = MovementParams::default();
+        let mut c = Character::default();
+        // Walking forward over ground that falls away 20 cm a step, for a second.
+        let mut ground = 0.0;
+        let mut airborne = 0;
+        for i in 0..200 {
+            if i > 0 && i % 20 == 0 {
+                ground -= 20.0;
+            }
+            c.step(&p, MoveIntent::default(), 0.0, ground, 0.005);
+            if !c.grounded {
+                airborne += 1;
+            }
+        }
+        assert_eq!(airborne, 0, "the walker left the ground {airborne} times");
+        assert_eq!(c.position[2], ground);
+
+        // A real ledge is still a fall: 2 m below is not a step.
+        let mut c = Character::default();
+        c.step(&p, MoveIntent::default(), 0.0, -200.0, 0.005);
+        assert!(!c.grounded, "a two-metre drop is a fall");
     }
 
     #[test]

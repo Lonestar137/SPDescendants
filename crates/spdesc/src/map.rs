@@ -218,13 +218,23 @@ pub(crate) fn collect_previews(mut previews: ResMut<Previews>, mut images: ResMu
     previews.collect(&mut images);
 }
 
-/// The map's collision hull, in the simulation's own frame and units (centimetres), offset so the
-/// spot the player spawns on is the origin — the same place the drawn mesh puts it.
+/// The map's collision, in the simulation's own frame and units (centimetres), offset so the spot
+/// the player spawns on is the origin — the same place the drawn mesh puts it.
 ///
-/// The project's own arena is a flat plane at zero that the scene itself builds, so it holds `None`
+/// The floor and the walls come from different places. The **floor** is the drawn world's surfaces,
+/// which are continuous on every map; the clipmap's own triangle list is terrain, and on a
+/// building-heavy map it is not the map (Terminal carries 14 199 brushes against Rust's 2 668, and
+/// the clipmap's triangles leave its interior bare). The **walls** are the clipmap's, because the
+/// drawn world's decorative geometry — railings, pipes, cables — would catch a player the game lets
+/// through. Either may be absent; a map with one stands and walks on it.
+///
+/// The project's own arena is a flat plane at zero that the scene itself builds, so both are `None`
 /// and the player walks on it directly.
 #[derive(Resource, Default)]
-pub(crate) struct MapCollision(pub(crate) Option<Collision>);
+pub(crate) struct MapCollision {
+    pub(crate) floor: Option<Collision>,
+    pub(crate) walls: Option<Collision>,
+}
 
 /// One Modern Warfare 2 world unit in centimetres — the simulation's own unit — since a map unit is
 /// an inch and The First Descendant works in centimetres.
@@ -263,7 +273,7 @@ struct ArrivedMap {
     id: String,
     world: WorldGeometry,
     spawn: Option<[f32; 3]>,
-    collision: Collision,
+    collision: MapCollision,
 }
 
 /// Maps read off the main thread, because walking a zone takes about half a second.
@@ -295,7 +305,7 @@ pub(crate) fn sync_map_mesh(
         for entity in &standing {
             commands.entity(entity).despawn();
         }
-        commands.insert_resource(MapCollision(None));
+        commands.insert_resource(MapCollision::default());
         for mut player in &mut players {
             player.character = Character::default();
         }
@@ -324,11 +334,10 @@ pub(crate) fn sync_map_mesh(
                 return;
             };
             let world = spdesc_mw2::read_world(&image);
-            let (collision, spawn) = match spdesc_mw2::read_clip(&image) {
-                Ok(clip) => collision_for(&clip),
-                Err(_) => (Collision::default(), None),
-            };
+            let spawns = spdesc_mw2::read_spawns(&image).unwrap_or_default();
+            let clip = spdesc_mw2::read_clip(&image).unwrap_or_default();
             if let Ok(world) = world {
+                let (collision, spawn) = collision_for(&world, &clip, &spawns);
                 let _ = outbox.send(ArrivedMap {
                     id,
                     world,
@@ -405,29 +414,13 @@ pub(crate) fn collect_map_mesh(
         }
         // The collision stands with the mesh, and the player is put back on the spot it is stood
         // around — the previous map's coordinates mean nothing on this one.
-        commands.insert_resource(MapCollision(Some(collision)));
+        commands.insert_resource(collision);
         for mut player in &mut players {
             player.character = Character::default();
         }
         maps.shown = Some(id);
         maps.reading = None;
     }
-}
-
-/// A Modern Warfare 2 collision hull in the simulation's own frame and units: the map's unit is an
-/// inch, so its vertices scale to centimetres, and the anchor puts the chosen spawn at the origin
-/// where the player already is.
-fn build_collision(clip: &ClipGeometry, spawn: Option<[f32; 3]>) -> Collision {
-    let anchor = spawn.map(scale_to_cm).unwrap_or([0.0; 3]);
-    let verts: Vec<[f64; 3]> = clip
-        .positions
-        .iter()
-        .map(|p| {
-            let p = scale_to_cm(*p);
-            [p[0] - anchor[0], p[1] - anchor[1], p[2] - anchor[2]]
-        })
-        .collect();
-    Collision::new(verts, &clip.indices)
 }
 
 /// One map position in the simulation's units and frame: the inch becomes the centimetre.
@@ -439,23 +432,93 @@ fn scale_to_cm(p: [f32; 3]) -> [f64; 3] {
     ]
 }
 
-/// A map's collision, and where to stand it.
+/// A map's collision and where to stand it.
 ///
-/// The collision is built once in the map's own frame to be *asked where its floor is*, since the
-/// clipmap's own walkable flags name a map full of levels and only the query knows which level has
-/// ground around it. The answer becomes the anchor, and the collision is built again offset to it.
-fn collision_for(clip: &ClipGeometry) -> (Collision, Option<[f32; 3]>) {
+/// Both meshes are built once in the map's own frame so spots can be tested against the drawn
+/// world's floor, and the anchor is one of the map's *own spawn points* with floor beneath it. Both
+/// are then built again offset to it, so they stand in the same place as the mesh.
+fn collision_for(
+    world: &WorldGeometry,
+    clip: &ClipGeometry,
+    spawns: &[[f32; 3]],
+) -> (MapCollision, Option<[f32; 3]>) {
     let absolute = Collision::new(
-        clip.positions.iter().copied().map(scale_to_cm).collect(),
-        &clip.indices,
+        world.positions.iter().copied().map(scale_to_cm).collect(),
+        &world.indices,
     );
-    let anchor = choose_spawn(&absolute, clip.spawn()).unwrap_or([0.0; 3]);
+    let anchor = anchor_for(&absolute, clip, spawns);
     let units = [
         (anchor[0] / CM_PER_MAP_UNIT) as f32,
         (anchor[1] / CM_PER_MAP_UNIT) as f32,
         (anchor[2] / CM_PER_MAP_UNIT) as f32,
     ];
-    (build_collision(clip, Some(units)), Some(units))
+    let offset = |p: [f32; 3]| {
+        let p = scale_to_cm(p);
+        [p[0] - anchor[0], p[1] - anchor[1], p[2] - anchor[2]]
+    };
+    let floor = Collision::new(
+        world.positions.iter().copied().map(offset).collect(),
+        &world.indices,
+    );
+    let walls = Collision::new(
+        clip.positions.iter().copied().map(offset).collect(),
+        &clip.indices,
+    );
+    (
+        MapCollision {
+            floor: (!floor.is_empty()).then_some(floor),
+            walls: (!walls.is_empty()).then_some(walls),
+        },
+        Some(units),
+    )
+}
+
+/// The width of ground a spot is asked for when testing it, centimetres.
+const SPAWN_REACH: f64 = 60.0;
+/// How far below a spawn its floor may be and still be its floor, centimetres. A spawn stands on
+/// ground; a spot over a void, whose only floor is a street far below, is not a place to stand.
+const SPAWN_TOLERANCE: f64 = 250.0;
+
+/// Where to stand the map: a spawn the map itself places a player at, on the floor beneath it.
+///
+/// The spawns are taken from the middle outwards, so a spawn in a far corner does not win over one
+/// among the rest, and each is accepted only when its floor is *right there* — a spawn over a void,
+/// whose only floor is far below, is not a place to stand. The anchor is the floor, so the player
+/// begins on it rather than falling to it. When the map names none — or none has floor under it —
+/// the fallback is the clipmap's own walkable middle, and then a search of the collision
+/// (`choose_spawn`).
+fn anchor_for(absolute: &Collision, clip: &ClipGeometry, spawns: &[[f32; 3]]) -> [f64; 3] {
+    let mut origins: Vec<[f32; 3]> = spawns.to_vec();
+    if !origins.is_empty() {
+        let median = |axis: usize| {
+            let mut values: Vec<f32> = origins.iter().map(|o| o[axis]).collect();
+            values.sort_by(f32::total_cmp);
+            values[values.len() / 2]
+        };
+        let (mx, my) = (median(0), median(1));
+        origins.sort_by(|a, b| {
+            let da = (a[0] - mx).powi(2) + (a[1] - my).powi(2);
+            let db = (b[0] - mx).powi(2) + (b[1] - my).powi(2);
+            da.total_cmp(&db)
+        });
+        for origin in &origins {
+            let at = scale_to_cm(*origin);
+            if let Some(floor) = absolute.floor_point(at, SPAWN_REACH)
+                && (floor[2] - at[2]).abs() <= SPAWN_TOLERANCE
+            {
+                return floor;
+            }
+        }
+    }
+    if let Some(hint) = clip.spawn() {
+        let at = scale_to_cm(hint);
+        if let Some(floor) = absolute.floor_point(at, SPAWN_REACH)
+            && (floor[2] - at[2]).abs() <= SPAWN_TOLERANCE
+        {
+            return floor;
+        }
+    }
+    choose_spawn(absolute, clip.spawn(), spawns).unwrap_or([0.0; 3])
 }
 
 /// Where to stand a map: the busiest patch of its dominant floor level, measured by asking the
@@ -466,7 +529,11 @@ fn collision_for(clip: &ClipGeometry) -> (Collision, Option<[f32; 3]>) {
 /// the floor above it, the level most of those spots stand on wins, and the spot with the most
 /// ground around it on that level is the answer. `hint` centres the search — the map's own walkable
 /// middle, in the map's units.
-fn choose_spawn(collision: &Collision, hint: Option<[f32; 3]>) -> Option<[f64; 3]> {
+fn choose_spawn(
+    collision: &Collision,
+    hint: Option<[f32; 3]>,
+    spawns: &[[f32; 3]],
+) -> Option<[f64; 3]> {
     /// How far apart the sampled spots are, centimetres: two and a half metres.
     const STEP: f64 = 250.0;
     /// How many steps in each direction the map is searched, ± three hundred metres.
@@ -477,16 +544,27 @@ fn choose_spawn(collision: &Collision, hint: Option<[f32; 3]>) -> Option<[f64; 3
     const LEVEL: f64 = 100.0;
     /// The square density is counted in, centimetres.
     const PATCH: f64 = 500.0;
+    /// How near one of the map's own spawns a spot must be to count, centimetres. The map places
+    /// its players there, so that is where it is played; a floor anywhere else is somewhere else.
+    const NEAR_SPAWN: f64 = 5000.0;
     if collision.is_empty() {
         return None;
     }
     let hint = hint.map(scale_to_cm).unwrap_or([0.0; 3]);
+    let spawns: Vec<[f64; 3]> = spawns.iter().copied().map(scale_to_cm).collect();
     let mut samples: Vec<[f64; 3]> = Vec::new();
     let mut levels: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
     for ix in -RANGE..=RANGE {
         for iy in -RANGE..=RANGE {
             let x = hint[0] + f64::from(ix) * STEP;
             let y = hint[1] + f64::from(iy) * STEP;
+            if !spawns.is_empty()
+                && !spawns.iter().any(|s| {
+                    (s[0] - x) * (s[0] - x) + (s[1] - y) * (s[1] - y) <= NEAR_SPAWN * NEAR_SPAWN
+                })
+            {
+                continue;
+            }
             // Asked from above everything, so the answer is the topmost floor over the spot.
             if let Some(z) = collision.ground([x, y, f64::INFINITY], REACH) {
                 *levels.entry((z / LEVEL).round() as i64).or_default() += 1;
@@ -714,12 +792,18 @@ mod tests {
             return;
         }
         let image = spdesc_mw2::open_zone(&path).expect("the map zone opens");
+        let world = spdesc_mw2::read_world(&image).expect("the world reads");
         let clip = spdesc_mw2::read_clip(&image).expect("the collision reads");
-        let (collision, spawn) = collision_for(&clip);
+        let spawns = spdesc_mw2::read_spawns(&image).expect("the map's spawns read");
+        let (collision, spawn) = collision_for(&world, &clip, &spawns);
         let spawn = spawn.expect("a map has a floor to stand on");
 
-        assert!(collision.triangle_count() > 1000, "a map has a hull");
-        let ground = collision
+        let floor = collision
+            .floor
+            .as_ref()
+            .expect("a map has a floor to stand on");
+        assert!(floor.triangle_count() > 1000, "a map has a floor");
+        let ground = floor
             .ground([0.0, 0.0, 0.0], 34.0)
             .expect("there is floor where the player spawns");
         assert!(
