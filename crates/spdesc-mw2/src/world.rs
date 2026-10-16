@@ -653,39 +653,25 @@ fn floor_like(a: &[f32; 3], b: &[f32; 3], c: &[f32; 3]) -> bool {
     len > 1e-9 && (nz / len).abs() > 0.5
 }
 
-/// The area of a collision triangle.
-fn triangle_area(a: &[f32; 3], b: &[f32; 3], c: &[f32; 3]) -> f32 {
-    let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-    let n = [
-        u[1] * v[2] - u[2] * v[1],
-        u[2] * v[0] - u[0] * v[2],
-        u[0] * v[1] - u[1] * v[0],
-    ];
-    0.5 * (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt()
-}
-
 impl ClipGeometry {
     /// How many triangles the collision has, and how many are walkable.
     pub fn triangle_count(&self) -> usize {
         self.indices.len() / 3
     }
-    /// A point to stand on: the middle of the map's floor.
+    /// A point to search from: the middle of the map's walkable ground, on a floor rather than the
+    /// side of something.
     ///
-    /// The walkable flags name ramps as well as floors, and a spot on a ramp or the side of
-    /// something is a poor place to stand a map on, so a triangle whose surface is near-vertical is
-    /// passed over: the anchor lands on ground. A map has more than one level — a floor, a roof, a
-    /// stairwell — so the ground is grouped by height and the *largest* level wins, by the area of
-    /// its floor rather than by how many triangles cover it: the floor a player walks on is the big
-    /// one, where a roof can be busy with detail on a fraction of the ground. The middle of that
-    /// level is then taken as a *median*, so one distant patch cannot drag the answer away.
-    /// `None` when the collision has no walkable triangle at all.
+    /// The walkable flags name ramps as well as floors, so a triangle whose surface is
+    /// near-vertical is passed over, and the middle is a *median* rather than a mean so one distant
+    /// patch cannot drag it away. `+Z` is up, so the middle is over `x` and `y` — searching the
+    /// plane `z` lies in would anchor a map on a wall.
+    ///
+    /// This is only where the search for a place to stand *starts*; the app asks the collision
+    /// itself where its floor is and picks from that (`spdesc::map::choose_spawn`), because a map
+    /// has levels and this cannot tell which of them has ground around it. `None` when the
+    /// collision has no walkable triangle at all.
     pub fn spawn(&self) -> Option<[f32; 3]> {
-        /// The height one level spans, centimetres: a map's floors are metres apart, not
-        /// centimetres.
-        const LEVEL: f32 = 100.0;
-        let mut flats: Vec<([f32; 3], f32)> = Vec::new();
-        let mut all: Vec<[f32; 3]> = Vec::new();
+        let mut centres: Vec<[f32; 3]> = Vec::new();
         for tri in self.indices.as_chunks::<3>().0 {
             let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
             if !self
@@ -703,45 +689,17 @@ impl ClipGeometry {
             ) else {
                 continue;
             };
-            let centre = [
-                (a[0] + b[0] + c[0]) / 3.0,
-                (a[1] + b[1] + c[1]) / 3.0,
-                (a[2] + b[2] + c[2]) / 3.0,
-            ];
             if floor_like(a, b, c) {
-                flats.push((centre, triangle_area(a, b, c)));
+                centres.push([
+                    (a[0] + b[0] + c[0]) / 3.0,
+                    (a[1] + b[1] + c[1]) / 3.0,
+                    (a[2] + b[2] + c[2]) / 3.0,
+                ]);
             }
-            all.push(centre);
         }
-        let flats = if flats.is_empty() {
-            all.into_iter().map(|centre| (centre, 1.0)).collect()
-        } else {
-            flats
-        };
-        if flats.is_empty() {
-            return None;
-        }
-        let mut levels: std::collections::HashMap<i32, f32> = std::collections::HashMap::new();
-        for (centre, area) in &flats {
-            *levels
-                .entry((centre[2] / LEVEL).round() as i32)
-                .or_default() += area;
-        }
-        // Deterministic: the largest level, ties broken by the number of samples then by height.
-        let mut ranked: Vec<(i32, f32)> = levels.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-        let main = ranked.first().map(|(level, _)| *level)?;
-        let centres: Vec<[f32; 3]> = flats
-            .into_iter()
-            .filter(|(c, _)| (c[2] / LEVEL).round() as i32 == main)
-            .map(|(c, _)| c)
-            .collect();
         if centres.is_empty() {
             return None;
         }
-        // The middle of that level, taken as a median rather than a mean so one distant patch — a
-        // roof, a catwalk — cannot drag the answer away. `+Z` is up, so the search is over `x` and
-        // `y`.
         let median = |axis: usize| {
             let mut values: Vec<f32> = centres.iter().map(|c| c[axis]).collect();
             values.sort_by(f32::total_cmp);

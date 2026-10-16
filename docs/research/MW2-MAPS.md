@@ -166,28 +166,29 @@ and then two queries run every frame (`spdesc_game_core::collision`):
 A walker that leaves the map — off an edge with nothing below — falls past the hull's lowest point
 and is put back on the spot the map stands around, so a map's void ends the fall.
 
-**The spawn is the map's largest floor level, by area.** A map has several levels (a floor, a roof, a
-stairwell), and the one a player walks on is the big one, measured by the *area* of its floor rather
-than by how many triangles cover it — a roof can be busy with detail on a fraction of the ground. The
-middle of that level, by median, is the anchor. Two earlier attempts are worth recording because they
-looked reasonable and were wrong: the nearest triangle to a plain median falls in a gap between two
-wings next to nothing, and the busiest patch by triangle count lands in a stairwell.
+**Where the map is stood is asked of the collision itself.** A map has several levels — a floor, a
+roof, a stairwell — and the clipmap's walkable flag does not say which of them a player can walk
+*around* in. So a grid of spots over the map is asked for the floor above it, the level that most of
+those spots stand on wins, and the spot with the most ground on every side on that level is the
+anchor. Three earlier attempts are worth recording because they looked reasonable and were not: the
+nearest triangle to a plain median of the walkable ground falls in a gap between two wings next to
+nothing; the busiest patch by triangle count lands in a stairwell; and picking a level by the area of
+its floor still cannot tell a big roof from a big floor.
 
-**Coverage is not uniform across maps.** Sampling the floor query on a grid within thirty metres of
-the spawn, the share of samples with floor under them:
+**The floor is continuous enough to walk on**, measured by sampling the query on a grid within thirty
+metres of the spawn and counting the spots with floor under them:
 
-| map | floor coverage at the capsule's reach |
+| map | floor coverage |
 | --- | --- |
-| `mp_subbase` | 86% |
-| `mp_rust` | 67% |
-| `mp_estate` | 67% |
-| `mp_terminal` | 20% |
+| `mp_rust` | 100% |
+| `mp_highrise` | 100% |
+| `mp_favela` | 100% |
+| `mp_subbase` | 100% |
+| `mp_estate` | 83% |
+| `mp_terminal` | 70% |
 
-Terminal's clipmap is the odd one: its walkable floors cover only a few hundred square metres, spread
-out, so a walker can leave the floor after ten or twenty metres and fall. That is the clipmap the map
-ships, not a misread — the same reader finds the drawn world, its surfaces, and its materials for the
-same map. If it needs to be walked properly, the game's own spawn points live in the map's entity
-data, which is not yet read.
+Terminal was 20% before the anchor was asked of the collision, and is 70% now; the rest is its
+clipmap's own sparse floor. A walker that leaves it falls and is returned to the spawn.
 
 ## What is not read
 
