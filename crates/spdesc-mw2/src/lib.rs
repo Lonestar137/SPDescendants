@@ -22,8 +22,8 @@ pub use maps::{MapEntry, map_zone_path, parse_arena, preview_entry};
 pub use open::{Error, Memory, ZoneImage, open_zone, parse_zone_image};
 pub use sounds::{LoadedSound, PCM, RawFile, SoundAlias, Table, ZoneData, read_zone};
 pub use world::{
-    ClipGeometry, MapReport, MaterialCounts, SurfaceRun, WorldCounts, read_clip, read_map,
-    read_runs,
+    ClipGeometry, MapReport, MaterialCounts, SurfaceRun, WorldCounts, WorldGeometry, read_clip,
+    read_map, read_runs, read_world,
 };
 
 /// The zones a Modern Warfare 2 install keeps its fastfiles in, under the install root.

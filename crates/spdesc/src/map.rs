@@ -23,7 +23,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use spdesc_game_core::{DEV_MAP, GameMap};
-use spdesc_mw2::ClipGeometry;
+use spdesc_mw2::WorldGeometry;
 use spdesc_mw2::{MapEntry, SoundBank, iwd, iwi};
 
 use crate::combat::{self, Enemy};
@@ -242,6 +242,13 @@ pub(crate) fn follow_choice(menu: Res<Menu>, mut chosen: ResMut<ChosenMap>) {
 #[derive(Component)]
 pub(crate) struct MapGeometry;
 
+/// A map that has been read: its drawn world, and the spot on its walkable ground to stand on.
+struct ArrivedMap {
+    id: String,
+    world: WorldGeometry,
+    spawn: Option<[f32; 3]>,
+}
+
 /// Maps read off the main thread, because walking a zone takes about half a second.
 #[derive(Resource, Default)]
 pub(crate) struct MapMeshes {
@@ -250,7 +257,7 @@ pub(crate) struct MapMeshes {
     /// The map being read right now, so one is not read twice.
     reading: Option<String>,
     /// Where a reader sends what it read.
-    inbox: Option<Mutex<Receiver<(String, ClipGeometry)>>>,
+    inbox: Option<Mutex<Receiver<ArrivedMap>>>,
 }
 
 /// Ask for the chosen map's own geometry, when it is a map the install supplies.
@@ -294,8 +301,12 @@ pub(crate) fn sync_map_mesh(
             let Ok(image) = spdesc_mw2::open_zone(&path) else {
                 return;
             };
-            if let Ok(geometry) = spdesc_mw2::read_clip(&image) {
-                let _ = outbox.send((id, geometry));
+            let world = spdesc_mw2::read_world(&image);
+            let spawn = spdesc_mw2::read_clip(&image)
+                .ok()
+                .and_then(|clip| clip.spawn());
+            if let Ok(world) = world {
+                let _ = outbox.send(ArrivedMap { id, world, spawn });
             }
         })
         .expect("spawn the map reader");
@@ -319,14 +330,14 @@ pub(crate) fn collect_map_mesh(
             arrived.push(item);
         }
     }
-    for (id, geometry) in arrived {
+    for ArrivedMap { id, world, spawn } in arrived {
         if id != chosen.id || chosen.targets {
             continue;
         }
         for entity in &standing {
             commands.entity(entity).despawn();
         }
-        let (positions, indices, offset) = mesh_data(&geometry);
+        let (positions, indices, offset) = mesh_data(&world, spawn);
         let mut mesh = Mesh::new(
             bevy::render::mesh::PrimitiveTopology::TriangleList,
             RenderAssetUsages::default(),
@@ -334,10 +345,10 @@ pub(crate) fn collect_map_mesh(
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
         mesh.insert_indices(bevy::render::mesh::Indices::U32(indices));
         mesh.compute_normals();
-        let (min, max) = geometry.extent();
+        let (min, max) = world.extent();
         info!(
             "map: {id} standing — {} triangles, {:.0}x{:.0}x{:.0} m",
-            geometry.triangle_count(),
+            world.triangle_count(),
             (max[0] - min[0]) / 100.0,
             (max[1] - min[1]) / 100.0,
             (max[2] - min[2]) / 100.0
@@ -362,31 +373,35 @@ pub(crate) fn collect_map_mesh(
     }
 }
 
-/// A collision mesh's positions and indices in Bevy space, and the offset that stands it with its
-/// floor at the origin and its middle over it, so the player starts inside the map rather than
-/// under or beside it.
+/// A world mesh's positions and indices in Bevy space, and the offset that stands it with the spot
+/// the player spawns on at the origin.
 ///
-/// The offset is taken from the *converted* positions: the conversion turns the game's `+Z` up into
-/// Bevy's `+Y` up, which swaps which end of the box is the floor, so measuring it before the
-/// conversion would put the map under the camera.
-fn mesh_data(geometry: &ClipGeometry) -> (Vec<[f32; 3]>, Vec<u32>, Vec3) {
+/// The offset is taken from the *converted* spawn rather than worked out in game units: the
+/// conversion turns the game's `+Z` up into Bevy's `+Y` up, so anything computed before it has its
+/// vertical axis the wrong way round. Standing the map on its *lowest* point instead would leave a
+/// map with any low ground at all — a valley, a stairwell — with its floor in the air, which is
+/// what the walkable spot avoids.
+fn mesh_data(geometry: &WorldGeometry, spawn: Option<[f32; 3]>) -> (Vec<[f32; 3]>, Vec<u32>, Vec3) {
     let positions: Vec<[f32; 3]> = geometry
         .positions
         .iter()
         .map(|p| crate::content::to_bevy(*p))
         .collect();
-    let mut min = [f32::MAX; 3];
-    let mut max = [f32::MIN; 3];
-    for position in &positions {
-        for axis in 0..3 {
-            min[axis] = min[axis].min(position[axis]);
-            max[axis] = max[axis].max(position[axis]);
-        }
-    }
     if positions.is_empty() {
         return (positions, geometry.indices.clone(), Vec3::ZERO);
     }
-    let offset = Vec3::new(-(min[0] + max[0]) / 2.0, -min[1], -(min[2] + max[2]) / 2.0);
+    let anchor = spawn.map(crate::content::to_bevy).unwrap_or_else(|| {
+        let mut min = [f32::MAX; 3];
+        let mut max = [f32::MIN; 3];
+        for position in &positions {
+            for axis in 0..3 {
+                min[axis] = min[axis].min(position[axis]);
+                max[axis] = max[axis].max(position[axis]);
+            }
+        }
+        [(min[0] + max[0]) / 2.0, min[1], (min[2] + max[2]) / 2.0]
+    });
+    let offset = Vec3::new(-anchor[0], -anchor[1], -anchor[2]);
     (positions, geometry.indices.clone(), offset)
 }
 

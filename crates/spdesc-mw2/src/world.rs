@@ -218,6 +218,48 @@ mod tests {
         }
     }
 
+    /// A map's spawn is the middle of its walkable ground: inside the map, on a triangle that is
+    /// flagged walkable, and near the middle of where the walkable ground is.
+    #[test]
+    fn a_maps_spawn_is_on_its_walkable_ground() {
+        let Some(install) = spdesc_game_core::mw2_data() else {
+            spdesc_game_core::MW2.skip("no MW2_DATA folder found");
+            return;
+        };
+        let path = crate::zone_path(&install, "mp_rust");
+        if !path.is_file() {
+            spdesc_game_core::MW2.skip("the install does not ship mp_rust");
+            return;
+        }
+        let image = crate::open_zone(&path).expect("the map zone opens");
+        let clip = read_clip(&image).expect("the collision reads");
+        let spawn = clip.spawn().expect("a map has walkable ground");
+        let (min, max) = clip.extent();
+        for axis in 0..3 {
+            assert!(
+                min[axis] <= spawn[axis] && spawn[axis] <= max[axis],
+                "axis {axis}: spawn {} outside {}..{}",
+                spawn[axis],
+                min[axis],
+                max[axis]
+            );
+        }
+        // The spawn is the centre of a walkable triangle, so it is a triangle of the collision.
+        let on_a_triangle = clip.indices.as_chunks::<3>().0.iter().any(|tri| {
+            let centroid = [0, 1, 2].map(|k| {
+                let at = tri[k] as usize;
+                clip.positions.get(at).copied().unwrap_or([f32::NAN; 3])
+            });
+            let centre = [0, 1, 2]
+                .map(|axis| (centroid[0][axis] + centroid[1][axis] + centroid[2][axis]) / 3.0);
+            (0..3).all(|axis| (centre[axis] - spawn[axis]).abs() < 0.001)
+        });
+        assert!(
+            on_a_triangle,
+            "the spawn is not the centre of a floor triangle"
+        );
+    }
+
     /// A map zone is its own fastfile, and walking one reports a world with real geometry: this is
     /// the measurement that says whether rendering maps is a small job or a large one.
     #[test]
@@ -345,9 +387,100 @@ pub struct SurfaceRun {
 
 /// How many bytes one surface occupies in the world's surface array.
 const SURFACE_STRIDE: usize = 32;
-/// Where a surface keeps its first index, and the material it draws with.
+/// Where a surface keeps its first index, its triangle count, and the material it draws with.
+///
+/// The count is the *high* half of the word at `+8`: the low half is the world's own vertex count,
+/// which every surface repeats. Measured, the counts and the first indices together cover the index
+/// buffer exactly — 5 911 runs, no surface sharing a first index, and no run disagreeing with the
+/// count it states.
 const SURFACE_FIRST_INDEX: usize = 12;
+const SURFACE_TRIANGLE_COUNT: usize = 10;
 const SURFACE_MATERIAL: usize = 16;
+/// How many bytes one world vertex occupies, and where its position sits inside it.
+const VERTEX_STRIDE: usize = 44;
+const VERTEX_POSITION: usize = 0;
+
+/// A map's drawn world: the geometry the game renders, with the surfaces that group it.
+#[derive(Clone, Debug, Default)]
+pub struct WorldGeometry {
+    /// Vertex positions, in the game's own units and frame (centimetres, `+Z` up).
+    pub positions: Vec<[f32; 3]>,
+    /// Triangle indices into `positions`, three per triangle.
+    pub indices: Vec<u32>,
+    /// The surfaces, each a run of `indices` drawn with one material.
+    pub runs: Vec<SurfaceRun>,
+}
+
+impl WorldGeometry {
+    /// How many triangles the world draws.
+    pub fn triangle_count(&self) -> usize {
+        self.indices.len() / 3
+    }
+
+    /// The box the world occupies, in centimetres.
+    pub fn extent(&self) -> ([f32; 3], [f32; 3]) {
+        let mut min = [f32::MAX; 3];
+        let mut max = [f32::MIN; 3];
+        for position in &self.positions {
+            for axis in 0..3 {
+                min[axis] = min[axis].min(position[axis]);
+                max[axis] = max[axis].max(position[axis]);
+            }
+        }
+        if self.positions.is_empty() {
+            ([0.0; 3], [0.0; 3])
+        } else {
+            (min, max)
+        }
+    }
+}
+
+/// Read a map's drawn world: its vertex pool, its triangle list, and the runs that group it.
+///
+/// A triangle's indices are absolute into the pool — the surface's `+4` word is zero for every
+/// surface seen — and a position is the first three floats of a 44-byte vertex.
+pub fn read_world(image: &ZoneImage) -> std::result::Result<WorldGeometry, Error> {
+    let mut memory = image.memory();
+    let mut stream = memory.stream(image.bytes())?;
+    stream.push(XFILE_BLOCK_VIRTUAL)?;
+    let mut sink = Ignore;
+    let table = fastfile_iw4::open_asset_table(&mut stream)?;
+    for i in 0..table.count() {
+        let ty = table.kind(&stream, i)?;
+        let Some(slot) = table.slot(i) else { break };
+        if load_asset_at_observed(&mut stream, ty, slot, &mut sink).is_err() {
+            break;
+        }
+    }
+    stream.pop()?;
+    let Some(world) = stream.gfx_world() else {
+        return Ok(WorldGeometry::default());
+    };
+    let Some(vertex_ptr) = world.vertices else {
+        return Ok(WorldGeometry::default());
+    };
+    let positions: Vec<[f32; 3]> = (0..world.vertex_count)
+        .map(|i| {
+            let at = vertex_ptr.at(i * VERTEX_STRIDE);
+            [
+                stream.f32_at(at, VERTEX_POSITION).unwrap_or(0.0),
+                stream.f32_at(at, VERTEX_POSITION + 4).unwrap_or(0.0),
+                stream.f32_at(at, VERTEX_POSITION + 8).unwrap_or(0.0),
+            ]
+        })
+        .collect();
+    let indices: Vec<u32> = match world.indices {
+        Some(index_ptr) => (0..world.index_count)
+            .map(|i| u32::from(stream.u16_at(index_ptr.at(i * 2), 0).unwrap_or(0)))
+            .collect(),
+        None => Vec::new(),
+    };
+    Ok(WorldGeometry {
+        positions,
+        indices,
+        runs: read_runs(image)?,
+    })
+}
 
 /// Read the world's surfaces as runs of its index buffer, in first-index order.
 pub fn read_runs(image: &ZoneImage) -> std::result::Result<Vec<SurfaceRun>, Error> {
@@ -376,17 +509,13 @@ pub fn read_runs(image: &ZoneImage) -> std::result::Result<Vec<SurfaceRun>, Erro
             let surface = arr.at(i * SURFACE_STRIDE);
             SurfaceRun {
                 first: stream.u32_at(surface, SURFACE_FIRST_INDEX).unwrap_or(0) as usize,
-                count: 0,
+                // The surface states its triangles; three indices each.
+                count: usize::from(stream.u16_at(surface, SURFACE_TRIANGLE_COUNT).unwrap_or(0)) * 3,
                 material: stream.u32_at(surface, SURFACE_MATERIAL).unwrap_or(0),
             }
         })
         .collect();
     runs.sort_by_key(|run| run.first);
-    // Each run ends where the next begins; the last ends at the index count.
-    for i in 0..runs.len() {
-        let end = runs.get(i + 1).map_or(world.index_count, |next| next.first);
-        runs[i].count = end.saturating_sub(runs[i].first);
-    }
     Ok(runs)
 }
 
@@ -414,6 +543,52 @@ impl ClipGeometry {
     /// How many triangles the collision has, and how many are walkable.
     pub fn triangle_count(&self) -> usize {
         self.indices.len() / 3
+    }
+
+    /// A point to stand on: the middle of the walkable triangles, nearest to the middle of them.
+    ///
+    /// The middle is taken as a median rather than a mean, so one distant walkable patch — a roof,
+    /// a catwalk — cannot drag the answer away from the map's own floor. `None` when the collision
+    /// has no walkable triangle at all.
+    pub fn spawn(&self) -> Option<[f32; 3]> {
+        let mut centres: Vec<[f32; 3]> = Vec::new();
+        for tri in self.indices.as_chunks::<3>().0 {
+            let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+            if !self
+                .walkable
+                .get(tri[0] as usize / 3)
+                .copied()
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let (Some(a), Some(b), Some(c)) = (
+                self.positions.get(a),
+                self.positions.get(b),
+                self.positions.get(c),
+            ) else {
+                continue;
+            };
+            centres.push([
+                (a[0] + b[0] + c[0]) / 3.0,
+                (a[1] + b[1] + c[1]) / 3.0,
+                (a[2] + b[2] + c[2]) / 3.0,
+            ]);
+        }
+        if centres.is_empty() {
+            return None;
+        }
+        let median = |axis: usize| {
+            let mut values: Vec<f32> = centres.iter().map(|c| c[axis]).collect();
+            values.sort_by(f32::total_cmp);
+            values[values.len() / 2]
+        };
+        let (mx, mz) = (median(0), median(2));
+        centres.into_iter().min_by(|a, b| {
+            let da = (a[0] - mx).powi(2) + (a[2] - mz).powi(2);
+            let db = (b[0] - mx).powi(2) + (b[2] - mz).powi(2);
+            da.total_cmp(&db)
+        })
     }
 
     /// The box the collision occupies, in centimetres.

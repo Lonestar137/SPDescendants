@@ -94,6 +94,34 @@ kilometre, which is not a map. The vertex pool is also about four times the larg
 buffer, which fits the vertex-layer scheme the world's own `vertexLayerData` field implies. That,
 and the position offset inside the 44-byte world vertex, is what a render needs next.
 
+## The drawn world
+
+A map's drawn geometry reads too. A surface states its **first index** at `+12` and its **triangle
+count** as the high half of the word at `+8` — the low half is the world's own vertex count, which
+every surface repeats. Measured against `mp_rust`: 5 911 surfaces, no two sharing a first index, no
+run disagreeing with the count it states, and the counts covering the index buffer exactly
+(579 864 of 579 864). The runs read earlier by taking each run's end from the next one's start were
+right for the same reason — the counts confirm them.
+
+A vertex is 44 bytes and its position is the first three floats. A triangle's indices are absolute
+into the pool: a surface's `+4` word is zero for every surface seen, and the pool is addressed
+directly. The pool is larger than the number of vertices addressed (235 386 against 58 496), which
+is what suggested a per-surface base in the first place; it is not one.
+
+Measured, the drawn world is bigger than the collision, as it should be: `mp_subbase` is 196 275
+triangles over 308 × 311 × 86 m, `mp_estate` 219 239 over a manor and its grounds.
+
+### Where a map stands
+
+A map is stood in the world by its **walkable ground**, not by its lowest point. The collision flags
+which triangles a player can stand on, and the spawn is the centre of the walkable triangle nearest
+the middle of the walkable ground — a median, so a distant roof or catwalk cannot drag it away. The
+map is then offset so that spot is at the origin, where the player already is.
+
+Standing a map on its lowest point instead leaves any map with low ground at all — a valley, a
+stairwell, a water channel — with its floors in the air above the player's feet, which is exactly
+what it looked like in play before this.
+
 ## The collision, which reads whole
 
 The clipmap is the one part of a map's *space* the vendored reader already captures completely: a
