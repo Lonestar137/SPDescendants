@@ -50,11 +50,34 @@ They are read on their own thread, one walk of the archives for all of them: a f
 more than a frame should hold up, and reading each entry on its own would re-open an archive's
 directory twenty-six times.
 
+## What a map zone holds
+
+A map is its own fastfile, and `cargo run -p spdesc-mw2 --example world` walks one and reports what
+is in it. Measured on this install:
+
+| map | assets | surfaces | vertices | indices | triangles | lightmap pages |
+| --- | --- | --- | --- | --- | --- | --- |
+| `mp_rust` | 480 | 5 911 | 235 386 | 579 864 | 193 288 | 3 |
+| `mp_estate` | 797 | 8 292 | 284 403 | 657 717 | 219 239 | 2 |
+| `mp_highrise` | 849 | 9 526 | 362 708 | 715 053 | 238 351 | 2 |
+| `mp_terminal` | 817 | 12 046 | 408 705 | 959 670 | 319 890 | 1 |
+
+Each zone walks in well under a second. The vertex and index pools are the world's own (every
+surface draws out of them), so a map is 200k–320k triangles over 6k–12k surfaces, with one sky and
+one to three lightmap pages — a few megabytes of vertex data, which is small for a GPU. The work in
+rendering a map is therefore not volume: it is reading the surfaces, resolving what each one draws
+with, and decoding the images.
+
+The zones also hold the collision the player walks on (`clipmap`) and the map's own HUD art
+(`material`: the compass, the objective icons). The materials the *world's surfaces* name are not
+among them — resolving those is reading the surface array itself, which is the next step.
+
 ## What is not read
 
-- **No map geometry.** Nothing here parses a `.ff` map's BSP, its worldspawn, its lightmaps or its
-  materials, so an imported map is *named*, not built: the ground a game is played on is still the
-  project's own arena, and the practice targets stand on it only when that arena is the map chosen.
+- **No map geometry is built.** Nothing here turns a map's world into meshes, so an imported map is
+  *named* and *measured*, not built: the ground a game is played on is still the project's own
+  arena, and the practice targets stand on it only when that arena is the map chosen. The counts
+  above are what the vendored reader reports; they are not yet surfaces on screen.
 - **No localised titles.** `localized_*` zones carry no string table the zone walk captures, so
   `PATCH_VACANT` cannot yet be resolved to whatever the game's own text says. The key is kept on the
   entry (`title_key`) for the day it can.
