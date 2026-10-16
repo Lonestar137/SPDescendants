@@ -227,7 +227,9 @@ Until then a map's walls are its clipmap triangles, and where those run out a wa
   among the listed assets either (10 `material` assets, all HUD: the compass and the head icons).
   The world's 76 materials are addressed from another zone and resolved by the game's own linker, so
   reading them means loading the shared zones and emulating that resolution. The colour-per-material
-  look is the interim that makes the world legible until then.
+  look is the interim that makes the world legible until then;
+  [`MW2-TEXTURES.md`](MW2-TEXTURES.md) records that investigation — the images are in the `.iwd`
+  archives and decode, and the one missing piece is which image each material names.
 - **No localised titles.** `localized_*` zones carry no string table the zone walk captures, so
   `PATCH_VACANT` cannot yet be resolved to whatever the game's own text says. The key is kept on the
   entry (`title_key`) for the day it can.
