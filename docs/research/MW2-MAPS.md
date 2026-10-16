@@ -72,6 +72,28 @@ The zones also hold the collision the player walks on (`clipmap`) and the map's 
 (`material`: the compass, the objective icons). The materials the *world's surfaces* name are not
 among them — resolving those is reading the surface array itself, which is the next step.
 
+## How a world's surfaces divide the index buffer
+
+The world's surface array is 32-byte entries in the virtual block. Two of its words were established
+from the data rather than from a remembered struct:
+
+- **A material pointer at `+16`** — a virtual-block pointer in 5911 of 5911 surfaces of `mp_rust`.
+- **A first index at `+12`** — the runs taken in that order tile the index buffer exactly, from 0 to
+  the index count, and **every run is a whole number of triangles**. A partition derived from
+  anything but the real first indices would not come out that way; the run *lengths* are therefore
+  each surface's first index minus the next one's, and the last run ends at the index count.
+
+Measured: `mp_rust` is 5 911 surfaces over **76 materials**, and `mp_estate` 8 292 surfaces over
+**222**, each run 1 to 128 triangles. That is the grouping a render needs, and it also answers what
+the earlier section left open: the world's materials are named by its surfaces, and there are
+hundreds of them, not the nine material *assets* the map zone itself carries.
+
+**Not established: how a run addresses its vertices.** A surface's `+4` word is too small to be the
+run's first vertex in most surfaces, and using it as one produces a world extent of about a
+kilometre, which is not a map. The vertex pool is also about four times the largest index in the
+buffer, which fits the vertex-layer scheme the world's own `vertexLayerData` field implies. That,
+and the position offset inside the 44-byte world vertex, is what a render needs next.
+
 ## What is not read
 
 - **No map geometry is built.** Nothing here turns a map's world into meshes, so an imported map is

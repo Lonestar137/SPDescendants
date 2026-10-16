@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 pub use maps::{MapEntry, map_zone_path, parse_arena, preview_entry};
 pub use open::{Error, Memory, ZoneImage, open_zone, parse_zone_image};
 pub use sounds::{LoadedSound, PCM, RawFile, SoundAlias, Table, ZoneData, read_zone};
-pub use world::{MapReport, MaterialCounts, WorldCounts, read_map};
+pub use world::{MapReport, MaterialCounts, SurfaceRun, WorldCounts, read_map, read_runs};
 
 /// The zones a Modern Warfare 2 install keeps its fastfiles in, under the install root.
 pub const ZONE_DIR: &str = "zone/english";

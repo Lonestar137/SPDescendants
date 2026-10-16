@@ -16,7 +16,8 @@
 use std::collections::BTreeMap;
 
 use fastfile_iw4::{
-    AssetType, GfxWorldGeometry, Ptr, XFILE_BLOCK_VIRTUAL, ZoneStream, load_asset_at_with,
+    AssetType, GfxWorldGeometry, Ptr, XFILE_BLOCK_VIRTUAL, ZoneStream, load_asset_at_observed,
+    load_asset_at_with,
 };
 
 use crate::open::{Error, ZoneImage};
@@ -214,5 +215,133 @@ mod tests {
             "a map zone holds {} assets",
             report.assets
         );
+
+        // The runs tile the index buffer, and every one is a whole number of triangles: a partition
+        // derived from anything but the real first indices would not come out that way.
+        let runs = read_runs(&image).expect("the runs read");
+        assert_eq!(runs.len(), world.surfaces);
+        assert_eq!(
+            runs[0].first, 0,
+            "the first run starts at the buffer's start"
+        );
+        let last = runs.last().expect("runs");
+        assert_eq!(last.first + last.count, world.indices);
+        let mut covered = 0usize;
+        for (i, run) in runs.iter().enumerate() {
+            assert!(run.count % 3 == 0, "run {i} is {} indices", run.count);
+            if let Some(next) = runs.get(i + 1) {
+                assert_eq!(
+                    run.first + run.count,
+                    next.first,
+                    "run {i} does not reach the next"
+                );
+            }
+            covered += run.count;
+        }
+        assert_eq!(covered, world.indices, "the runs do not cover the buffer");
+        let materials: std::collections::HashSet<u32> =
+            runs.iter().map(|run| run.material).collect();
+        assert!(
+            materials.len() > 10,
+            "the world draws with {} materials",
+            materials.len()
+        );
     }
 }
+
+/// A sink that ignores what the walk reports about links: the probe only needs the zone's bodies
+/// loaded, in order.
+#[derive(Default)]
+struct Ignore;
+
+impl fastfile_iw4::AssetLinkSink for Ignore {
+    fn loaded(
+        &mut self,
+        _s: &ZoneStream<'_>,
+        _ty: AssetType,
+        _slot: Ptr,
+        _insert_slot: Option<Ptr>,
+    ) -> fastfile_iw4::Result<()> {
+        Ok(())
+    }
+
+    fn alias(&mut self, _ty: AssetType, _slot: Ptr, _target: Ptr) -> fastfile_iw4::Result<()> {
+        Ok(())
+    }
+}
+
+/// A map's surfaces, as runs of its world's index buffer.
+///
+/// A surface draws one run, in one material. The run's first index is the surface's own word at
+/// `+12`; the runs are contiguous in that order and the last one ends at the index count. That was
+/// established from the data rather than from a remembered struct: the runs in first-index order
+/// tile the index buffer exactly, and **every run is a whole number of triangles** — a partition
+/// derived from anything but the real first indices would not be.
+///
+/// What is *not* established is how a run addresses its vertices: a surface's `+4` is too small to
+/// be the run's first vertex in most surfaces, and reading the pool with it produces an extent of
+/// about a kilometre, which is not a map. The pool is also about four times the size of the largest
+/// index, which fits the vertex-layer scheme the world's own `vertexLayerData` implies. Resolving
+/// that is the next step; this reads the runs and their materials, which is what a render needs to
+/// group its triangles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SurfaceRun {
+    /// The first index of the run, in the world's index buffer.
+    pub first: usize,
+    /// How many indices it draws. Always a multiple of three.
+    pub count: usize,
+    /// The material the surface draws with, as the zone stores the word: it decodes as a pointer
+    /// into the virtual block, which is how the walk already follows it.
+    pub material: u32,
+}
+
+/// How many bytes one surface occupies in the world's surface array.
+const SURFACE_STRIDE: usize = 32;
+/// Where a surface keeps its first index, and the material it draws with.
+const SURFACE_FIRST_INDEX: usize = 12;
+const SURFACE_MATERIAL: usize = 16;
+
+/// Read the world's surfaces as runs of its index buffer, in first-index order.
+pub fn read_runs(image: &ZoneImage) -> std::result::Result<Vec<SurfaceRun>, Error> {
+    let mut memory = image.memory();
+    let mut stream = memory.stream(image.bytes())?;
+    stream.push(XFILE_BLOCK_VIRTUAL)?;
+    let mut sink = Ignore;
+    let table = fastfile_iw4::open_asset_table(&mut stream)?;
+    for i in 0..table.count() {
+        let ty = table.kind(&stream, i)?;
+        let Some(slot) = table.slot(i) else { break };
+        if load_asset_at_observed(&mut stream, ty, slot, &mut sink).is_err() {
+            break;
+        }
+    }
+    stream.pop()?;
+    let Some(world) = stream.gfx_world() else {
+        return Ok(Vec::new());
+    };
+    let Some(arr) = world.surfaces else {
+        return Ok(Vec::new());
+    };
+
+    let mut runs: Vec<SurfaceRun> = (0..world.surface_count)
+        .map(|i| {
+            let surface = arr.at(i * SURFACE_STRIDE);
+            SurfaceRun {
+                first: stream.u32_at(surface, SURFACE_FIRST_INDEX).unwrap_or(0) as usize,
+                count: 0,
+                material: stream.u32_at(surface, SURFACE_MATERIAL).unwrap_or(0),
+            }
+        })
+        .collect();
+    runs.sort_by_key(|run| run.first);
+    // Each run ends where the next begins; the last ends at the index count.
+    for i in 0..runs.len() {
+        let end = runs.get(i + 1).map_or(world.index_count, |next| next.first);
+        runs[i].count = end.saturating_sub(runs[i].first);
+    }
+    Ok(runs)
+}
+
+/// Where each surface's material sits, and the vertex base it is addressed with.
+#[doc(hidden)]
+pub const SURFACE_FIELDS: [usize; 3] = [4, SURFACE_FIRST_INDEX, SURFACE_MATERIAL];

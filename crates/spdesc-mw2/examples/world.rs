@@ -1,4 +1,5 @@
-//! Measure a Modern Warfare 2 map zone: what it holds, and how heavy its world is.
+//! Measure a Modern Warfare 2 map zone: what it holds, how heavy its world is, and how its
+//! surfaces divide the index buffer between the materials they draw with.
 //!
 //! A development instrument for deciding what rendering a map involves — how many surfaces,
 //! vertices and indices its world has, how many materials it draws with, and how many textures
@@ -106,6 +107,23 @@ fn main() -> std::process::ExitCode {
             .collect();
         if !shown.is_empty() {
             println!("  heaviest: {}", shown.join(", "));
+        }
+        match spdesc_mw2::read_runs(&image) {
+            Ok(runs) => {
+                let materials: std::collections::HashSet<u32> =
+                    runs.iter().map(|run| run.material).collect();
+                let triangles: usize = runs.iter().map(|run| run.count / 3).sum();
+                let widest = runs.iter().map(|run| run.count / 3).max().unwrap_or(0);
+                let narrowest = runs.iter().map(|run| run.count / 3).min().unwrap_or(0);
+                println!(
+                    "  runs: {} surfaces over {} materials, {triangles} triangles ({}..{} each)",
+                    runs.len(),
+                    materials.len(),
+                    narrowest,
+                    widest
+                );
+            }
+            Err(error) => println!("  runs: cannot read: {error}"),
         }
     }
     std::process::ExitCode::SUCCESS
