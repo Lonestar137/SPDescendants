@@ -260,6 +260,49 @@ mod tests {
         );
     }
 
+    /// The invariant the drawn world's addressing must satisfy, and does not yet.
+    ///
+    /// A map's collision is generated from what it draws, so the two occupy the same space: their
+    /// boxes must agree, axis by axis, to within a little. This is the check that says whether a
+    /// surface's vertex indices address the pool correctly — a wrong addressing scatters the
+    /// triangles and the drawn world comes out a fraction of the collision's size, or several times
+    /// larger. It is ignored because the addressing is unsolved and this states the target rather
+    /// than a passing property; it is not a test that should be turned on until it holds.
+    ///
+    /// Measured while getting here: addressing directly from the index values gives a world about a
+    /// quarter the size of the collision — the pool is four times the largest index in the buffer —
+    /// and offsetting by the surface's `+4` word gives one about three times too large. Neither is
+    /// right, so the mapping is something else: a stride, or the vertex layers `vertexLayerData`
+    /// implies.
+    #[test]
+    #[ignore]
+    fn the_drawn_world_occupies_the_same_space_as_its_collision() {
+        let Some(install) = spdesc_game_core::mw2_data() else {
+            spdesc_game_core::MW2.skip("no MW2_DATA folder found");
+            return;
+        };
+        let path = crate::zone_path(&install, "mp_rust");
+        if !path.is_file() {
+            spdesc_game_core::MW2.skip("the install does not ship mp_rust");
+            return;
+        }
+        let image = crate::open_zone(&path).expect("the map zone opens");
+        let world = read_world(&image).expect("the world reads");
+        let clip = read_clip(&image).expect("the collision reads");
+        let (wmin, wmax) = world.extent();
+        let (cmin, cmax) = clip.extent();
+        for axis in 0..3 {
+            let drawn = wmax[axis] - wmin[axis];
+            let solid = cmax[axis] - cmin[axis];
+            let ratio = drawn / solid.max(1.0);
+            assert!(
+                (0.6..1.6).contains(&ratio),
+                "axis {axis}: the world spans {drawn:.0} cm where its collision spans {solid:.0} \
+                 (ratio {ratio:.2}), so the vertex indices do not address the pool"
+            );
+        }
+    }
+
     /// A map zone is its own fastfile, and walking one reports a world with real geometry: this is
     /// the measurement that says whether rendering maps is a small job or a large one.
     #[test]

@@ -114,8 +114,18 @@ The ratio is about 3.6, and the vertex pool is about four times the largest inde
 are not laid out in index order, and something — a per-surface base, or the vertex *layers* the
 world's own `vertexLayerData` field implies — has to be applied and is not.
 
-A surface's `+4` word looked like that base, and is not: using it changes nothing (it is zero on
-every surface sampled) and the result is as far from the collision's box as addressing directly is.
+Two candidates were measured against the collision's box and both are wrong. Addressing directly from
+the index values gives a world about a quarter the size — the pool is four times the largest index in
+the buffer. Offsetting by the surface's `+4` word — which rises with the surface (64 519, 122 938,
+187 702 down `mp_subbase`'s array against a pool of 259 175, exactly what a pool laid out surface by
+surface looks like) — gives one about three times too large. The truth is between the two, and the
+fact that `+4` rises monotonically is the strongest clue left: the mapping is something else, either
+a stride over the pool or the vertex layers the world's `vertexLayerData` field implies.
+
+The check that will settle it is stated in `crates/spdesc-mw2/src/world.rs` as an ignored test: a
+map's collision is generated from what it draws, so the two occupy the same space and their boxes
+must agree to within a little. It fails today, which is why it is ignored rather than deleted — it is
+the target, not a passing property.
 Until this is solved, the app stands the *collision* — which reads whole, is the map's own shape,
 and is what the player walks on — rather than the drawn world.
 
