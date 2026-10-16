@@ -23,7 +23,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use spdesc_game_core::{DEV_MAP, GameMap};
-use spdesc_mw2::WorldGeometry;
+use spdesc_mw2::ClipGeometry;
 use spdesc_mw2::{MapEntry, SoundBank, iwd, iwi};
 
 use crate::combat::{self, Enemy};
@@ -238,15 +238,19 @@ pub(crate) fn follow_choice(menu: Res<Menu>, mut chosen: ResMut<ChosenMap>) {
     }
 }
 
-/// A map's own geometry, standing in the world as one mesh.
+/// The map's own *solid* geometry, standing in the world as one mesh.
+///
+/// This is the collision hull, not the drawn world. The drawn world reads (`spdesc_mw2::read_world`)
+/// but its vertex addressing is not solved: it reaches only about a quarter of the vertex pool, so
+/// what it draws is a quarter of the map's space with the rest scrambled — a tangle with fragments
+/// of detail in it. The collision reads whole and is the map's own shape, so it is what stands.
 #[derive(Component)]
 pub(crate) struct MapGeometry;
 
-/// A map that has been read: its drawn world, and the spot on its walkable ground to stand on.
+/// A map that has been read: its solid geometry.
 struct ArrivedMap {
     id: String,
-    world: WorldGeometry,
-    spawn: Option<[f32; 3]>,
+    solid: ClipGeometry,
 }
 
 /// Maps read off the main thread, because walking a zone takes about half a second.
@@ -301,12 +305,8 @@ pub(crate) fn sync_map_mesh(
             let Ok(image) = spdesc_mw2::open_zone(&path) else {
                 return;
             };
-            let world = spdesc_mw2::read_world(&image);
-            let spawn = spdesc_mw2::read_clip(&image)
-                .ok()
-                .and_then(|clip| clip.spawn());
-            if let Ok(world) = world {
-                let _ = outbox.send(ArrivedMap { id, world, spawn });
+            if let Ok(solid) = spdesc_mw2::read_clip(&image) {
+                let _ = outbox.send(ArrivedMap { id, solid });
             }
         })
         .expect("spawn the map reader");
@@ -330,14 +330,15 @@ pub(crate) fn collect_map_mesh(
             arrived.push(item);
         }
     }
-    for ArrivedMap { id, world, spawn } in arrived {
+    for ArrivedMap { id, solid } in arrived {
         if id != chosen.id || chosen.targets {
             continue;
         }
         for entity in &standing {
             commands.entity(entity).despawn();
         }
-        let (positions, indices, offset) = mesh_data(&world, spawn);
+        let spawn = solid.spawn();
+        let (positions, indices, offset) = mesh_data(&solid, spawn);
         let mut mesh = Mesh::new(
             bevy::render::mesh::PrimitiveTopology::TriangleList,
             RenderAssetUsages::default(),
@@ -345,10 +346,10 @@ pub(crate) fn collect_map_mesh(
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
         mesh.insert_indices(bevy::render::mesh::Indices::U32(indices));
         mesh.compute_normals();
-        let (min, max) = world.extent();
+        let (min, max) = solid.extent();
         info!(
             "map: {id} standing — {} triangles, {:.0}x{:.0}x{:.0} m",
-            world.triangle_count(),
+            solid.triangle_count(),
             (max[0] - min[0]) / 100.0,
             (max[1] - min[1]) / 100.0,
             (max[2] - min[2]) / 100.0
@@ -381,7 +382,7 @@ pub(crate) fn collect_map_mesh(
 /// vertical axis the wrong way round. Standing the map on its *lowest* point instead would leave a
 /// map with any low ground at all — a valley, a stairwell — with its floor in the air, which is
 /// what the walkable spot avoids.
-fn mesh_data(geometry: &WorldGeometry, spawn: Option<[f32; 3]>) -> (Vec<[f32; 3]>, Vec<u32>, Vec3) {
+fn mesh_data(geometry: &ClipGeometry, spawn: Option<[f32; 3]>) -> (Vec<[f32; 3]>, Vec<u32>, Vec3) {
     let positions: Vec<[f32; 3]> = geometry
         .positions
         .iter()

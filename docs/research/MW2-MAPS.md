@@ -103,10 +103,21 @@ run disagreeing with the count it states, and the counts covering the index buff
 (579 864 of 579 864). The runs read earlier by taking each run's end from the next one's start were
 right for the same reason — the counts confirm them.
 
-A vertex is 44 bytes and its position is the first three floats. A triangle's indices are absolute
-into the pool: a surface's `+4` word is zero for every surface seen, and the pool is addressed
-directly. The pool is larger than the number of vertices addressed (235 386 against 58 496), which
-is what suggested a per-surface base in the first place; it is not one.
+A vertex is 44 bytes and its position is the first three floats.
+
+**The vertex addressing is not solved, and a wrong guess draws a tangle.** In play, the drawn world
+came out as a scrambled mesh with fragments of the real map in it. Measuring why: with the world
+addressed directly from the index values, the geometry spans about 55 × 89 × 12 m on `mp_subbase`
+where the collision — read from a layout known good, and the same space — spans 200 × 290 × 28 m.
+The ratio is about 3.6, and the vertex pool is about four times the largest index in the buffer
+(235 386 against 58 496), so the read is reaching roughly a quarter of the pool: the map's vertices
+are not laid out in index order, and something — a per-surface base, or the vertex *layers* the
+world's own `vertexLayerData` field implies — has to be applied and is not.
+
+A surface's `+4` word looked like that base, and is not: using it changes nothing (it is zero on
+every surface sampled) and the result is as far from the collision's box as addressing directly is.
+Until this is solved, the app stands the *collision* — which reads whole, is the map's own shape,
+and is what the player walks on — rather than the drawn world.
 
 Measured, the drawn world is bigger than the collision, as it should be: `mp_subbase` is 196 275
 triangles over 308 × 311 × 86 m, `mp_estate` 219 239 over a manor and its grounds.
