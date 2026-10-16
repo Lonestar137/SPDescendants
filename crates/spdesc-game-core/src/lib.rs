@@ -7,6 +7,7 @@
 //! game's own assets, and `MW2_DATA`, the optional sound source. Both are read-only runtime input:
 //! never written, never committed.
 
+pub mod collision;
 pub mod combat;
 pub mod data;
 pub mod maps;
@@ -15,6 +16,7 @@ pub mod progression;
 
 // The `tfd_data_or_skip!` and `mw2_data_or_skip!` macros are `#[macro_export]`, so they are
 // already re-exported at the crate root: `spdesc_game_core::tfd_data_or_skip!(...)`.
+pub use collision::Collision;
 pub use data::{ALL, DataRoot, MW2, TFD, mw2_data, skipped, tfd_data};
 pub use maps::{DEV_MAP, GameMap, Maps};
 pub use progression::{Progression, Promotion, Rank, Ranks, XP_PER_HIT, XP_PER_KILL};

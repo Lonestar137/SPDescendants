@@ -149,6 +149,46 @@ walks on is the map's playable shape, measured above in units rather than by its
 a collision hull rather than the drawn world — no props or material detail — which is why they are
 used for placement rather than displayed in place of the world surfaces.
 
+## Standing and walking on the collision
+
+The clipmap drives the player, not just the map's placement. Its triangles are converted to the
+simulation's own frame and units (the inch becomes centimetre), the chosen spawn becomes the origin,
+and then two queries run every frame (`spdesc_game_core::collision`):
+
+- **The floor** under the player is the highest floor-oriented triangle within a capsule's width of
+  it and no more than a step (55 cm) above the feet, so a walker steps onto a stair or a kerb, climbs
+  a slope, and falls off a ledge. A ceiling is not a floor, and neither is a triangle above the
+  reachable band.
+- **The walls** push a vertical capsule out of anything beside it. A step short enough that the floor
+  query would lift the walker onto it is *not* a wall, or stairs would be a wall — that was the first
+  thing the live run showed: the player pinned against a stair riser, moving two centimetres a second.
+
+A walker that leaves the map — off an edge with nothing below — falls past the hull's lowest point
+and is put back on the spot the map stands around, so a map's void ends the fall.
+
+**The spawn is the map's largest floor level, by area.** A map has several levels (a floor, a roof, a
+stairwell), and the one a player walks on is the big one, measured by the *area* of its floor rather
+than by how many triangles cover it — a roof can be busy with detail on a fraction of the ground. The
+middle of that level, by median, is the anchor. Two earlier attempts are worth recording because they
+looked reasonable and were wrong: the nearest triangle to a plain median falls in a gap between two
+wings next to nothing, and the busiest patch by triangle count lands in a stairwell.
+
+**Coverage is not uniform across maps.** Sampling the floor query on a grid within thirty metres of
+the spawn, the share of samples with floor under them:
+
+| map | floor coverage at the capsule's reach |
+| --- | --- |
+| `mp_subbase` | 86% |
+| `mp_rust` | 67% |
+| `mp_estate` | 67% |
+| `mp_terminal` | 20% |
+
+Terminal's clipmap is the odd one: its walkable floors cover only a few hundred square metres, spread
+out, so a walker can leave the floor after ten or twenty metres and fall. That is the clipmap the map
+ships, not a misread — the same reader finds the drawn world, its surfaces, and its materials for the
+same map. If it needs to be walked properly, the game's own spawn points live in the map's entity
+data, which is not yet read.
+
 ## What is not read
 
 - **Not material appearance.** The drawn-world mesh stands, grouped into one mesh per material, and

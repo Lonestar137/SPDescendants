@@ -22,12 +22,14 @@ use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
-use spdesc_game_core::{DEV_MAP, GameMap};
-use spdesc_mw2::WorldGeometry;
+use spdesc_game_core::movement::Character;
+use spdesc_game_core::{Collision, DEV_MAP, GameMap};
+use spdesc_mw2::{ClipGeometry, WorldGeometry};
 use spdesc_mw2::{MapEntry, SoundBank, iwd, iwi};
 
 use crate::combat::{self, Enemy};
 use crate::menu::Menu;
+use crate::player::Player;
 
 /// What the project calls its own arena.
 const DEV_TITLE: &str = "Dev arena";
@@ -216,6 +218,18 @@ pub(crate) fn collect_previews(mut previews: ResMut<Previews>, mut images: ResMu
     previews.collect(&mut images);
 }
 
+/// The map's collision hull, in the simulation's own frame and units (centimetres), offset so the
+/// spot the player spawns on is the origin — the same place the drawn mesh puts it.
+///
+/// The project's own arena is a flat plane at zero that the scene itself builds, so it holds `None`
+/// and the player walks on it directly.
+#[derive(Resource, Default)]
+pub(crate) struct MapCollision(pub(crate) Option<Collision>);
+
+/// One Modern Warfare 2 world unit in centimetres — the simulation's own unit — since a map unit is
+/// an inch and The First Descendant works in centimetres.
+const CM_PER_MAP_UNIT: f64 = crate::content::MW2_METRES_PER_UNIT as f64 * 100.0;
+
 /// The map being played, as the gameplay systems need it.
 #[derive(Resource, Default)]
 pub(crate) struct ChosenMap {
@@ -249,6 +263,7 @@ struct ArrivedMap {
     id: String,
     world: WorldGeometry,
     spawn: Option<[f32; 3]>,
+    collision: Collision,
 }
 
 /// Maps read off the main thread, because walking a zone takes about half a second.
@@ -270,6 +285,7 @@ pub(crate) fn sync_map_mesh(
     mut maps: ResMut<MapMeshes>,
     chosen: Res<ChosenMap>,
     mut commands: Commands,
+    mut players: Query<&mut Player>,
     standing: Query<Entity, With<MapGeometry>>,
 ) {
     if chosen.id.is_empty() || maps.shown.as_deref() == Some(chosen.id.as_str()) {
@@ -278,6 +294,10 @@ pub(crate) fn sync_map_mesh(
     if chosen.targets {
         for entity in &standing {
             commands.entity(entity).despawn();
+        }
+        commands.insert_resource(MapCollision(None));
+        for mut player in &mut players {
+            player.character = Character::default();
         }
         maps.shown = None;
         maps.reading = None;
@@ -304,11 +324,19 @@ pub(crate) fn sync_map_mesh(
                 return;
             };
             let world = spdesc_mw2::read_world(&image);
-            let spawn = spdesc_mw2::read_clip(&image)
-                .ok()
-                .and_then(|clip| clip.spawn());
+            let clip = spdesc_mw2::read_clip(&image).ok();
+            let spawn = clip.as_ref().and_then(|clip| clip.spawn());
+            let collision = clip
+                .as_ref()
+                .map(|clip| build_collision(clip, spawn))
+                .unwrap_or_default();
             if let Ok(world) = world {
-                let _ = outbox.send(ArrivedMap { id, world, spawn });
+                let _ = outbox.send(ArrivedMap {
+                    id,
+                    world,
+                    spawn,
+                    collision,
+                });
             }
         })
         .expect("spawn the map reader");
@@ -321,6 +349,7 @@ pub(crate) fn collect_map_mesh(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut players: Query<&mut Player>,
     standing: Query<Entity, With<MapGeometry>>,
 ) {
     let mut arrived = Vec::new();
@@ -332,7 +361,13 @@ pub(crate) fn collect_map_mesh(
             arrived.push(item);
         }
     }
-    for ArrivedMap { id, world, spawn } in arrived {
+    for ArrivedMap {
+        id,
+        world,
+        spawn,
+        collision,
+    } in arrived
+    {
         if id != chosen.id || chosen.targets {
             continue;
         }
@@ -370,9 +405,34 @@ pub(crate) fn collect_map_mesh(
                 ChildOf(map),
             ));
         }
+        // The collision stands with the mesh, and the player is put back on the spot it is stood
+        // around — the previous map's coordinates mean nothing on this one.
+        commands.insert_resource(MapCollision(Some(collision)));
+        for mut player in &mut players {
+            player.character = Character::default();
+        }
         maps.shown = Some(id);
         maps.reading = None;
     }
+}
+
+/// A Modern Warfare 2 collision hull in the simulation's own frame and units: the map's unit is an
+/// inch, so its vertices scale to centimetres, and the anchor puts the walkable spawn at the
+/// origin where the player already is.
+fn build_collision(clip: &ClipGeometry, spawn: Option<[f32; 3]>) -> Collision {
+    let anchor = spawn.unwrap_or([0.0; 3]);
+    let verts: Vec<[f64; 3]> = clip
+        .positions
+        .iter()
+        .map(|p| {
+            [
+                f64::from(p[0] - anchor[0]) * CM_PER_MAP_UNIT,
+                f64::from(p[1] - anchor[1]) * CM_PER_MAP_UNIT,
+                f64::from(p[2] - anchor[2]) * CM_PER_MAP_UNIT,
+            ]
+        })
+        .collect();
+    Collision::new(verts, &clip.indices)
 }
 
 /// Where a map's transform sits in Bevy space, so the spot the player spawns on lands at the
@@ -550,6 +610,35 @@ mod tests {
         bare.allies.clear();
         bare.axis.clear();
         assert_eq!(detail_of(&bare), "");
+    }
+
+    /// A map's collision hull is stood where the map is: its unit converts to the simulation's
+    /// (inches to centimetres) and the walkable spawn becomes the origin, so there is floor at the
+    /// origin for the player who spawns there.
+    #[test]
+    fn a_maps_collision_stands_under_its_spawn() {
+        let Some(install) = spdesc_game_core::mw2_data() else {
+            spdesc_game_core::MW2.skip("no MW2_DATA folder found");
+            return;
+        };
+        let path = spdesc_mw2::map_zone_path(&install, "mp_rust");
+        if !path.is_file() {
+            spdesc_game_core::MW2.skip("the install does not ship mp_rust");
+            return;
+        }
+        let image = spdesc_mw2::open_zone(&path).expect("the map zone opens");
+        let clip = spdesc_mw2::read_clip(&image).expect("the collision reads");
+        let spawn = clip.spawn().expect("a map has walkable ground");
+        let collision = build_collision(&clip, Some(spawn));
+
+        assert!(collision.triangle_count() > 1000, "a map has a hull");
+        let ground = collision
+            .ground([0.0, 0.0, 0.0], 34.0)
+            .expect("there is floor where the player spawns");
+        assert!(
+            ground.abs() < 60.0,
+            "the spawn is not on the floor: {ground} cm away"
+        );
     }
 
     /// The catalogue always opens with the project's own map, which is the one with the targets, and

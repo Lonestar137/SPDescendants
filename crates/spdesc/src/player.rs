@@ -26,6 +26,13 @@ const CAMERA_DISTANCE: f32 = 4.0;
 const CAMERA_TARGET_HEIGHT: f32 = 1.4;
 /// The camera's pitch clamp, degrees.
 const MAX_PITCH: f64 = 80.0;
+/// The player's collision capsule: the radius it will not come closer than to a wall, and how tall
+/// it stands from its feet, centimetres. The simulation's units are the game's.
+const PLAYER_RADIUS: f64 = 34.0;
+const PLAYER_HEIGHT: f64 = 180.0;
+/// How far below the map's lowest point a walker may fall before it is put back on the map,
+/// centimetres. A map's void has no floor, so falling into it has to end.
+const RESPAWN_BELOW: f64 = 2000.0;
 
 /// The player entity. The simulation state lives here; presentation reads it.
 #[derive(Component, Default)]
@@ -534,6 +541,7 @@ pub fn drive_player(
     buttons: Res<ButtonInput<MouseButton>>,
     mouse: Res<AccumulatedMouseMotion>,
     windows: Query<&CursorOptions, With<PrimaryWindow>>,
+    collision: Res<crate::map::MapCollision>,
     mut rigs: Query<&mut CameraRig>,
     mut players: Query<(&mut Player, &mut Transform)>,
 ) {
@@ -595,7 +603,32 @@ pub fn drive_player(
         // Camera-relative movement: forward is the way the camera faces, so the character turns to
         // follow the camera and the sticks always steer relative to the view.
         player.aiming = aiming;
-        player.character.step(&params, intent, frame_yaw, 0.0, dt);
+        // The floor under the player: the map's own collision when one is standing, or the flat
+        // plane the project's own arena is. With no floor within a step the walker is airborne and
+        // gravity takes it.
+        let collision = collision.0.as_ref();
+        let ground = match collision {
+            Some(collision) => collision
+                .ground(player.character.position, PLAYER_RADIUS)
+                .unwrap_or(f64::NEG_INFINITY),
+            None => 0.0,
+        };
+        player
+            .character
+            .step(&params, intent, frame_yaw, ground, dt);
+        // And the walls: the capsule is pushed back out of whatever it has run into, so a room has
+        // walls rather than a map-shaped hole in them.
+        if let Some(collision) = collision {
+            player.character.position =
+                collision.slide(player.character.position, PLAYER_RADIUS, PLAYER_HEIGHT);
+            // A walker that has left the map — off a ledge with nothing below — falls past the
+            // hull's lowest point and is put back on the spot the map stands around.
+            if let Some(lowest) = collision.lowest()
+                && player.character.position[2] < lowest - RESPAWN_BELOW
+            {
+                player.character = Character::default();
+            }
+        }
         transform.translation = position_to_bevy(player.character.position);
         transform.rotation =
             Quat::from_rotation_y(player.character.yaw.to_radians() as f32 + MODEL_YAW_OFFSET);
@@ -724,6 +757,7 @@ mod tests {
         app.init_resource::<ButtonInput<KeyCode>>();
         app.init_resource::<ButtonInput<MouseButton>>();
         app.init_resource::<AccumulatedMouseMotion>();
+        app.init_resource::<crate::map::MapCollision>();
         let mut time = Time::<()>::default();
         time.advance_by(Duration::from_millis(100));
         app.insert_resource(time);

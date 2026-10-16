@@ -26,8 +26,8 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 
 use map::{
-    ChosenMap, MapMeshes, Previews, build_rows, collect_map_mesh, collect_previews, follow_choice,
-    show_dev_arena, sync_map_mesh, sync_targets,
+    ChosenMap, MapCollision, MapMeshes, Previews, build_rows, collect_map_mesh, collect_previews,
+    follow_choice, show_dev_arena, sync_map_mesh, sync_targets,
 };
 use menu::{
     draw_dev, draw_map, draw_pages, draw_rows, draw_scrollbars, draw_tabs, menu_keys, menu_pointer,
@@ -71,6 +71,7 @@ fn main() {
         // does: it has to exist from the first frame.
         .init_resource::<menu::Menu>()
         .init_resource::<ChosenMap>()
+        .init_resource::<MapCollision>()
         .init_resource::<MapMeshes>()
         .add_systems(
             Startup,
