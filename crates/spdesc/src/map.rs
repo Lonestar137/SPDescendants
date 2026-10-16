@@ -23,6 +23,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use spdesc_game_core::{DEV_MAP, GameMap};
+use spdesc_mw2::ClipGeometry;
 use spdesc_mw2::{MapEntry, SoundBank, iwd, iwi};
 
 use crate::combat::{self, Enemy};
@@ -218,20 +219,191 @@ pub(crate) fn collect_previews(mut previews: ResMut<Previews>, mut images: ResMu
 /// The map being played, as the gameplay systems need it.
 #[derive(Resource, Default)]
 pub(crate) struct ChosenMap {
+    pub(crate) id: String,
     pub(crate) title: String,
     pub(crate) targets: bool,
 }
 
 /// Follow the menu's choice, so the rest of the game knows which map it is on.
 pub(crate) fn follow_choice(menu: Res<Menu>, mut chosen: ResMut<ChosenMap>) {
-    let (title, targets) = menu.chosen_map();
-    if chosen.title != title || chosen.targets != targets {
+    let (id, title, targets) = menu.chosen_map();
+    if chosen.id != id || chosen.title != title || chosen.targets != targets {
         info!(
             "map: {title}{}",
             if targets { " (practice targets)" } else { "" }
         );
+        chosen.id = id;
         chosen.title = title;
         chosen.targets = targets;
+    }
+}
+
+/// A map's own geometry, standing in the world as one mesh.
+#[derive(Component)]
+pub(crate) struct MapGeometry;
+
+/// Maps read off the main thread, because walking a zone takes about half a second.
+#[derive(Resource, Default)]
+pub(crate) struct MapMeshes {
+    /// The map whose geometry is standing in the world.
+    shown: Option<String>,
+    /// The map being read right now, so one is not read twice.
+    reading: Option<String>,
+    /// Where a reader sends what it read.
+    inbox: Option<Mutex<Receiver<(String, ClipGeometry)>>>,
+}
+
+/// Ask for the chosen map's own geometry, when it is a map the install supplies.
+///
+/// The project's own arena is not read from anywhere: it *is* the ground the scene builds, so
+/// choosing it puts that back and takes the imported geometry away.
+pub(crate) fn sync_map_mesh(
+    mut maps: ResMut<MapMeshes>,
+    chosen: Res<ChosenMap>,
+    mut commands: Commands,
+    standing: Query<Entity, With<MapGeometry>>,
+) {
+    if chosen.id.is_empty() || maps.shown.as_deref() == Some(chosen.id.as_str()) {
+        return;
+    }
+    if chosen.targets {
+        for entity in &standing {
+            commands.entity(entity).despawn();
+        }
+        maps.shown = None;
+        maps.reading = None;
+        return;
+    }
+    if maps.reading.as_deref() == Some(chosen.id.as_str()) {
+        return;
+    }
+    let Some(install) = spdesc_game_core::mw2_data() else {
+        return;
+    };
+    let id = chosen.id.clone();
+    let path = spdesc_mw2::map_zone_path(&install, &id);
+    if !path.is_file() {
+        return;
+    }
+    let (outbox, inbox) = channel();
+    maps.inbox = Some(Mutex::new(inbox));
+    maps.reading = Some(id.clone());
+    std::thread::Builder::new()
+        .name("spdesc-map-geometry".into())
+        .spawn(move || {
+            let Ok(image) = spdesc_mw2::open_zone(&path) else {
+                return;
+            };
+            if let Ok(geometry) = spdesc_mw2::read_clip(&image) {
+                let _ = outbox.send((id, geometry));
+            }
+        })
+        .expect("spawn the map reader");
+}
+
+/// Take in a map that has been read, and stand it in the world.
+pub(crate) fn collect_map_mesh(
+    mut maps: ResMut<MapMeshes>,
+    chosen: Res<ChosenMap>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    standing: Query<Entity, With<MapGeometry>>,
+) {
+    let mut arrived = Vec::new();
+    {
+        let Some(inbox) = maps.inbox.as_ref().and_then(|inbox| inbox.lock().ok()) else {
+            return;
+        };
+        while let Ok(item) = inbox.try_recv() {
+            arrived.push(item);
+        }
+    }
+    for (id, geometry) in arrived {
+        if id != chosen.id || chosen.targets {
+            continue;
+        }
+        for entity in &standing {
+            commands.entity(entity).despawn();
+        }
+        let (positions, indices, offset) = mesh_data(&geometry);
+        let mut mesh = Mesh::new(
+            bevy::render::mesh::PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        mesh.insert_indices(bevy::render::mesh::Indices::U32(indices));
+        mesh.compute_normals();
+        let (min, max) = geometry.extent();
+        info!(
+            "map: {id} standing — {} triangles, {:.0}x{:.0}x{:.0} m",
+            geometry.triangle_count(),
+            (max[0] - min[0]) / 100.0,
+            (max[1] - min[1]) / 100.0,
+            (max[2] - min[2]) / 100.0
+        );
+        commands.spawn((
+            MapGeometry,
+            Mesh3d(meshes.add(mesh)),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgb(0.55, 0.56, 0.58),
+                perceptual_roughness: 0.9,
+                // Collision is a hull seen from the outside in: its faces are wound outward, so a
+                // camera inside the map reads the back of every wall. Lighting both sides is what
+                // makes the inside a room rather than a silhouette.
+                cull_mode: None,
+                double_sided: true,
+                ..default()
+            })),
+            Transform::from_translation(offset),
+        ));
+        maps.shown = Some(id);
+        maps.reading = None;
+    }
+}
+
+/// A collision mesh's positions and indices in Bevy space, and the offset that stands it with its
+/// floor at the origin and its middle over it, so the player starts inside the map rather than
+/// under or beside it.
+///
+/// The offset is taken from the *converted* positions: the conversion turns the game's `+Z` up into
+/// Bevy's `+Y` up, which swaps which end of the box is the floor, so measuring it before the
+/// conversion would put the map under the camera.
+fn mesh_data(geometry: &ClipGeometry) -> (Vec<[f32; 3]>, Vec<u32>, Vec3) {
+    let positions: Vec<[f32; 3]> = geometry
+        .positions
+        .iter()
+        .map(|p| crate::content::to_bevy(*p))
+        .collect();
+    let mut min = [f32::MAX; 3];
+    let mut max = [f32::MIN; 3];
+    for position in &positions {
+        for axis in 0..3 {
+            min[axis] = min[axis].min(position[axis]);
+            max[axis] = max[axis].max(position[axis]);
+        }
+    }
+    if positions.is_empty() {
+        return (positions, geometry.indices.clone(), Vec3::ZERO);
+    }
+    let offset = Vec3::new(-(min[0] + max[0]) / 2.0, -min[1], -(min[2] + max[2]) / 2.0);
+    (positions, geometry.indices.clone(), offset)
+}
+
+/// Show the project's own arena only while the project's own map is the one being played.
+pub(crate) fn show_dev_arena(
+    maps: Res<MapMeshes>,
+    mut arenas: Query<&mut Visibility, With<crate::DevArena>>,
+) {
+    let wanted = if maps.shown.is_some() {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
+    for mut visibility in &mut arenas {
+        if *visibility != wanted {
+            *visibility = wanted;
+        }
     }
 }
 

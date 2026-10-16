@@ -251,7 +251,7 @@ impl DataSource {
 }
 
 /// Convert a game-space position (cm, `+Z` up) to Bevy space (m, `+Y` up).
-fn to_bevy(v: [f32; 3]) -> [f32; 3] {
+pub(crate) fn to_bevy(v: [f32; 3]) -> [f32; 3] {
     [v[0] * 0.01, v[2] * 0.01, -v[1] * 0.01]
 }
 

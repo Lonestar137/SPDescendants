@@ -25,7 +25,10 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 
-use map::{ChosenMap, Previews, build_rows, collect_previews, follow_choice, sync_targets};
+use map::{
+    ChosenMap, MapMeshes, Previews, build_rows, collect_map_mesh, collect_previews, follow_choice,
+    show_dev_arena, sync_map_mesh, sync_targets,
+};
 use menu::{
     draw_dev, draw_map, draw_pages, draw_rows, draw_scrollbars, draw_tabs, menu_keys, menu_pointer,
     place_menu, setup_menu,
@@ -68,6 +71,7 @@ fn main() {
         // does: it has to exist from the first frame.
         .init_resource::<menu::Menu>()
         .init_resource::<ChosenMap>()
+        .init_resource::<MapMeshes>()
         .add_systems(
             Startup,
             (
@@ -92,6 +96,9 @@ fn main() {
                     menu_pointer,
                     collect_previews,
                     follow_choice,
+                    sync_map_mesh,
+                    collect_map_mesh,
+                    show_dev_arena,
                     sync_targets,
                     draw_map,
                     draw_map_label,
@@ -257,8 +264,10 @@ fn setup_scene(
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.9, 0.5, 0.0)),
     ));
 
-    // A large checker ground plane at Y = 0 (200 m square), the "basic map of any kind".
+    // A large checker ground plane at Y = 0 (200 m square), the "basic map of any kind". It is
+    // the project's own arena, so an imported map hides it rather than drawing both.
     commands.spawn((
+        DevArena,
         Mesh3d(meshes.add(Plane3d::default().mesh().size(200.0, 200.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color_texture: Some(images.add(checker_image(512, 64))),
@@ -278,6 +287,7 @@ fn setup_scene(
     });
     for (x, z) in [(-8.0, -8.0), (8.0, -8.0), (-8.0, 8.0), (8.0, 8.0)] {
         commands.spawn((
+            DevArena,
             Mesh3d(pillar.clone()),
             MeshMaterial3d(pillar_material.clone()),
             Transform::from_xyz(x, 2.0, z),
@@ -339,6 +349,10 @@ struct Reticle;
 /// The line naming the map the game is playing on.
 #[derive(Component)]
 struct MapLabel;
+
+/// The project's own arena: its ground and its reference pillars, which an imported map hides.
+#[derive(Component)]
+pub(crate) struct DevArena;
 
 /// The Modern Warfare 2 zones the app read, kept so the things built out of them — the map
 /// catalogue — are built from what the install actually ships. `SoundBank` itself is Bevy-free,

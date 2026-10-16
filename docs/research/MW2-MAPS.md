@@ -94,12 +94,28 @@ kilometre, which is not a map. The vertex pool is also about four times the larg
 buffer, which fits the vertex-layer scheme the world's own `vertexLayerData` field implies. That,
 and the position offset inside the 44-byte world vertex, is what a render needs next.
 
+## The collision, which reads whole
+
+The clipmap is the one part of a map's *space* the vendored reader already captures completely: a
+vertex pool of 12-byte records that are three floats, and triangle indices that are u16. Nothing has
+to be guessed, so a map's collision reads straight out and stands in the world as one mesh.
+
+| map | vertices | triangles | walkable | spans |
+| --- | --- | --- | --- | --- |
+| `mp_rust` | 43 489 | 68 408 | 17 584 | 598 × 923 × 35 m |
+| `mp_estate` | 43 912 | 75 511 | 17 757 | 228 × 221 × 47 m |
+| `mp_terminal` | 42 679 | 70 919 | 15 354 | 319 × 321 × 9 m |
+
+Those are the map's own shapes: Terminal is a flat 9 metres tall, Estate a manor and its grounds.
+It is the collision hull rather than the drawn world — no props, no detail, and the faces are wound
+outward, so a camera inside reads the back of every wall — but it is the map, and it is what the
+player will walk on.
+
 ## What is not read
 
-- **No map geometry is built.** Nothing here turns a map's world into meshes, so an imported map is
-  *named* and *measured*, not built: the ground a game is played on is still the project's own
-  arena, and the practice targets stand on it only when that arena is the map chosen. The counts
-  above are what the vendored reader reports; they are not yet surfaces on screen.
+- **Not the drawn world.** A map's *surfaces* — the geometry with the materials and lightmaps that
+  make it look like a place — are read as runs (above) but not yet built as meshes. What stands in
+  the world is the collision hull: the map's shape, untextured.
 - **No localised titles.** `localized_*` zones carry no string table the zone walk captures, so
   `PATCH_VACANT` cannot yet be resolved to whatever the game's own text says. The key is kept on the
   entry (`title_key`) for the day it can.

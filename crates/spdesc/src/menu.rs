@@ -374,11 +374,11 @@ impl Menu {
         self.scroll_into_view(Pane::Map);
     }
 
-    /// The map being played: its title, and whether the practice targets stand on it.
-    pub(crate) fn chosen_map(&self) -> (String, bool) {
+    /// The map being played: its id, its title, and whether the practice targets stand on it.
+    pub(crate) fn chosen_map(&self) -> (String, String, bool) {
         match self.map_rows.get(self.map_pick) {
-            Some(row) => (row.map.title.clone(), row.map.targets),
-            None => (String::new(), false),
+            Some(row) => (row.map.id.clone(), row.map.title.clone(), row.map.targets),
+            None => (String::new(), String::new(), false),
         }
     }
 
@@ -1742,7 +1742,10 @@ mod tests {
         menu.fill_maps(rows, "mp_terminal");
         assert_eq!(menu.map_pick, 2);
         assert_eq!(menu.saved_map(), "mp_terminal");
-        assert_eq!(menu.chosen_map(), ("Terminal".to_owned(), false));
+        assert_eq!(
+            menu.chosen_map(),
+            ("mp_terminal".to_owned(), "Terminal".to_owned(), false)
+        );
         assert_eq!(menu.count(Pane::Map), 3);
         assert_eq!(menu.label(Pane::Map, 1), "Rust");
 
@@ -1756,7 +1759,10 @@ mod tests {
             "",
         );
         assert_eq!(fresh.map_pick, 0);
-        assert_eq!(fresh.chosen_map(), ("Dev arena".to_owned(), true));
+        assert_eq!(
+            fresh.chosen_map(),
+            (DEV_MAP.to_owned(), "Dev arena".to_owned(), true)
+        );
         let mut unknown = Menu::default();
         unknown.fill_maps(
             vec![
@@ -1769,7 +1775,7 @@ mod tests {
             unknown.map_pick, 0,
             "a map this install lacks is the default"
         );
-        assert!(unknown.chosen_map().1, "which is where the targets stand");
+        assert!(unknown.chosen_map().2, "which is where the targets stand");
     }
 
     /// Stepping past either end of a long list scrolls it, and comes back: the highlight is never

@@ -170,6 +170,54 @@ fn material_counts(s: &ZoneStream<'_>) -> Option<MaterialCounts> {
 mod tests {
     use super::*;
 
+    /// A map's collision geometry reads whole: a real vertex pool of positions and a real triangle
+    /// list, with every index inside the pool and an extent the size of a map rather than of noise.
+    #[test]
+    fn a_maps_collision_reads_as_geometry() {
+        let Some(install) = spdesc_game_core::mw2_data() else {
+            spdesc_game_core::MW2.skip("no MW2_DATA folder found");
+            return;
+        };
+        let map = "mp_rust";
+        let path = crate::zone_path(&install, map);
+        if !path.is_file() {
+            spdesc_game_core::MW2.skip("the install does not ship mp_rust");
+            return;
+        }
+        let image = crate::open_zone(&path).expect("the map zone opens");
+        let clip = read_clip(&image).expect("the collision reads");
+
+        assert!(
+            clip.positions.len() > 1000,
+            "{} vertices",
+            clip.positions.len()
+        );
+        assert!(
+            clip.triangle_count() > 1000,
+            "{} triangles",
+            clip.triangle_count()
+        );
+        assert_eq!(clip.walkable.len(), clip.triangle_count());
+        assert!(
+            clip.walkable.iter().filter(|walk| **walk).count() > 100,
+            "a map has walkable triangles"
+        );
+        let largest = clip.indices.iter().copied().max().unwrap_or(0) as usize;
+        assert!(
+            largest < clip.positions.len(),
+            "an index leaves the vertex pool"
+        );
+        // Positions are centimetres: a map is hundreds of metres, not kilometres and not nothing.
+        let (min, max) = clip.extent();
+        for axis in 0..3 {
+            let span = max[axis] - min[axis];
+            assert!(
+                (1000.0..600_000.0).contains(&span),
+                "axis {axis} spans {span} cm"
+            );
+        }
+    }
+
     /// A map zone is its own fastfile, and walking one reports a world with real geometry: this is
     /// the measurement that says whether rendering maps is a small job or a large one.
     #[test]
@@ -345,3 +393,103 @@ pub fn read_runs(image: &ZoneImage) -> std::result::Result<Vec<SurfaceRun>, Erro
 /// Where each surface's material sits, and the vertex base it is addressed with.
 #[doc(hidden)]
 pub const SURFACE_FIELDS: [usize; 3] = [4, SURFACE_FIRST_INDEX, SURFACE_MATERIAL];
+
+/// A map's collision geometry: the triangles a player stands on and walks into.
+///
+/// The clipmap is the one piece of a map's *space* the vendored reader already captures whole —
+/// its vertex pool is 12-byte records of three floats and its triangles are u16 indices — so this
+/// reads it without guessing a layout. It is the collision hull rather than the drawn world, so it
+/// is missing props and detail, but it is the map's own shape and the player can walk on it.
+#[derive(Clone, Debug, Default)]
+pub struct ClipGeometry {
+    /// Vertex positions, in the game's own units and frame (centimetres, `+Z` up).
+    pub positions: Vec<[f32; 3]>,
+    /// Triangle indices into `positions`, three per triangle.
+    pub indices: Vec<u32>,
+    /// Whether each triangle is one a player can stand on.
+    pub walkable: Vec<bool>,
+}
+
+impl ClipGeometry {
+    /// How many triangles the collision has, and how many are walkable.
+    pub fn triangle_count(&self) -> usize {
+        self.indices.len() / 3
+    }
+
+    /// The box the collision occupies, in centimetres.
+    pub fn extent(&self) -> ([f32; 3], [f32; 3]) {
+        let mut min = [f32::MAX; 3];
+        let mut max = [f32::MIN; 3];
+        for position in &self.positions {
+            for axis in 0..3 {
+                min[axis] = min[axis].min(position[axis]);
+                max[axis] = max[axis].max(position[axis]);
+            }
+        }
+        if self.positions.is_empty() {
+            ([0.0; 3], [0.0; 3])
+        } else {
+            (min, max)
+        }
+    }
+}
+
+/// Read the map zone's collision geometry.
+pub fn read_clip(image: &ZoneImage) -> std::result::Result<ClipGeometry, Error> {
+    let mut memory = image.memory();
+    let mut stream = memory.stream(image.bytes())?;
+    stream.push(XFILE_BLOCK_VIRTUAL)?;
+    let mut sink = Ignore;
+    let table = fastfile_iw4::open_asset_table(&mut stream)?;
+    for i in 0..table.count() {
+        let ty = table.kind(&stream, i)?;
+        let Some(slot) = table.slot(i) else { break };
+        if load_asset_at_observed(&mut stream, ty, slot, &mut sink).is_err() {
+            break;
+        }
+    }
+    stream.pop()?;
+    let Some(clip) = stream.clip_map() else {
+        return Ok(ClipGeometry::default());
+    };
+    let Some(verts) = clip.verts else {
+        return Ok(ClipGeometry::default());
+    };
+    let positions: Vec<[f32; 3]> = (0..clip.vert_count)
+        .map(|i| {
+            let at = verts.at(i * 12);
+            [
+                stream.f32_at(at, 0).unwrap_or(0.0),
+                stream.f32_at(at, 4).unwrap_or(0.0),
+                stream.f32_at(at, 8).unwrap_or(0.0),
+            ]
+        })
+        .collect();
+    let (indices, walkable) = match clip.tri_indices {
+        Some(tris) => {
+            let count = 3 * clip.tri_count;
+            let indices: Vec<u32> = (0..count)
+                .map(|i| u32::from(stream.u16_at(tris.at(i * 2), 0).unwrap_or(0)))
+                .collect();
+            // The walkable flag is one bit per triangle, packed into words.
+            let walkable = match clip.tri_edge_is_walkable {
+                Some(flags) => (0..clip.tri_count)
+                    .map(|t| {
+                        stream
+                            .u32_at(flags, (t / 32) * 4)
+                            .map(|word| word & (1 << (t % 32)) != 0)
+                            .unwrap_or(false)
+                    })
+                    .collect(),
+                None => vec![false; clip.tri_count],
+            };
+            (indices, walkable)
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    Ok(ClipGeometry {
+        positions,
+        indices,
+        walkable,
+    })
+}

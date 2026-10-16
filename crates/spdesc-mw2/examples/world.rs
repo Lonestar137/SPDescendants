@@ -108,6 +108,22 @@ fn main() -> std::process::ExitCode {
         if !shown.is_empty() {
             println!("  heaviest: {}", shown.join(", "));
         }
+        match spdesc_mw2::read_clip(&image) {
+            Ok(clip) => {
+                let (min, max) = clip.extent();
+                let walkable = clip.walkable.iter().filter(|walk| **walk).count();
+                println!(
+                    "  collision: {} vertices, {} triangles ({walkable} walkable), \
+                     spans {:.0}x{:.0}x{:.0} m",
+                    clip.positions.len(),
+                    clip.triangle_count(),
+                    (max[0] - min[0]) / 100.0,
+                    (max[1] - min[1]) / 100.0,
+                    (max[2] - min[2]) / 100.0
+                );
+            }
+            Err(error) => println!("  collision: cannot read: {error}"),
+        }
         match spdesc_mw2::read_runs(&image) {
             Ok(runs) => {
                 let materials: std::collections::HashSet<u32> =
